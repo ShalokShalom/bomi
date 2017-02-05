@@ -114,7 +114,7 @@ private:
     P0(OsdStyle, sub_style, {})
     P0(bool, sub_prefer_external, true)
 
-    P0(bool, enable_system_tray, true)
+    P0(bool, enable_system_tray, false)
     P0(bool, hide_rather_close, true)
     P0(MouseActionMap, mouse_action_map, defaultMouseActionMap())
     P0(bool, invert_wheel, false)
