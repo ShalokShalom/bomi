@@ -1,0 +1,181 @@
+CHANGES.txt:  * New: option to ignore playback resume switching item in playlist (#201)
+src/mpv/misc/dispatch.c:void mp_dispatch_resume(struct mp_dispatch_queue *queue)
+src/mpv/misc/dispatch.c:    mp_dispatch_resume(queue);
+src/mpv/misc/dispatch.h:void mp_dispatch_resume(struct mp_dispatch_queue *queue);
+src/mpv/video/out/vo.h:    /* start/resume playback */
+src/mpv/input/ipc.c:    } else if (!strcmp("resume", cmd)) {
+src/mpv/input/ipc.c:        mpv_resume(arg->client);
+src/mpv/input/ipc.c:            mpv_resume(arg->client);
+src/mpv/player/lua/defaults.lua:    t:resume()
+src/mpv/player/lua/defaults.lua:function timer_mt.resume(t)
+src/mpv/player/lua/defaults.lua:        -- suspended, and the error was handled, but no resume was done.
+src/mpv/player/lua/defaults.lua:            mp.resume_all()
+src/mpv/player/lua/osc.lua:            -- resume existing one
+src/mpv/player/lua/osc.lua:            state.timer:resume()
+src/mpv/player/configfiles.c:static char *mp_get_playback_resume_config_filename(struct MPContext *mpctx,
+src/mpv/player/configfiles.c:// resume config. Uses backup_properties[] meaning/order of values.
+src/mpv/player/configfiles.c:void mp_get_resume_defaults(struct MPContext *mpctx)
+src/mpv/player/configfiles.c:    mpctx->resume_defaults = list;
+src/mpv/player/configfiles.c:    conffile = mp_get_playback_resume_config_filename(mpctx, filename);
+src/mpv/player/configfiles.c:            char *prev = mpctx->resume_defaults[i];
+src/mpv/player/configfiles.c:void mp_load_playback_resume(struct MPContext *mpctx, const char *file)
+src/mpv/player/configfiles.c:    if (!mpctx->opts->position_resume)
+src/mpv/player/configfiles.c:    char *fname = mp_get_playback_resume_config_filename(mpctx, file);
+src/mpv/player/configfiles.c:               "be disabled with --no-resume-playback.\n");
+src/mpv/player/configfiles.c:// Returns the first file that has a resume config.
+src/mpv/player/configfiles.c:// resume file for them, this is simpler, and also has the nice property
+src/mpv/player/configfiles.c:struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
+src/mpv/player/configfiles.c:    if (!mpctx->opts->position_resume)
+src/mpv/player/configfiles.c:        char *conf = mp_get_playback_resume_config_filename(mpctx, e->filename);
+src/mpv/player/client.c:void mpv_resume(mpv_handle *ctx)
+src/mpv/player/client.c:    bool do_resume = false;
+src/mpv/player/client.c:        do_resume = ctx->suspend_count == 1;
+src/mpv/player/client.c:    if (do_resume)
+src/mpv/player/client.c:        mp_dispatch_resume(ctx->mpctx->dispatch);
+src/mpv/player/client.c:void mp_resume_all(mpv_handle *ctx)
+src/mpv/player/client.c:    bool do_resume = ctx->suspend_count > 0;
+src/mpv/player/client.c:    if (do_resume)
+src/mpv/player/client.c:        mp_dispatch_resume(ctx->mpctx->dispatch);
+src/mpv/player/client.c:    mp_resume_all(ctx);
+src/mpv/player/client.h:void mp_resume_all(struct mpv_handle *ctx);
+src/mpv/player/playloop.c:        ao_resume(mpctx->ao);
+src/mpv/player/main.c:    "resume-playback=no\n"
+src/mpv/player/main.c:    mp_get_resume_defaults(mpctx);
+src/mpv/player/loadfile.c:    pl->current = mp_check_playlist_resume(mpctx, pl);
+src/mpv/player/loadfile.c:    mp_load_playback_resume(mpctx, mpctx->filename);
+src/mpv/player/lua.c:    mp_resume_all(client);
+src/mpv/player/lua.c:static int script_resume(lua_State *L)
+src/mpv/player/lua.c:    mpv_resume(ctx->client);
+src/mpv/player/lua.c:static int script_resume_all(lua_State *L)
+src/mpv/player/lua.c:    mp_resume_all(get_ctx(L)->client);
+src/mpv/player/lua.c:    mp_resume_all(ctx->client);
+src/mpv/player/lua.c:    FN_ENTRY(resume),
+src/mpv/player/lua.c:    FN_ENTRY(resume_all),
+src/mpv/player/core.h:    STATUS_SYNCING,     // seeking for a position to resume
+src/mpv/player/core.h:    char **resume_defaults;
+src/mpv/player/core.h:void mp_get_resume_defaults(struct MPContext *mpctx);
+src/mpv/player/core.h:void mp_load_playback_resume(struct MPContext *mpctx, const char *file);
+src/mpv/player/core.h:struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
+src/mpv/libmpv/client.h: * suspended until the last thread resumes it. Note that during suspension, all
+src/mpv/libmpv/client.h: * Call mpv_resume() to resume the playback thread. You must call mpv_resume()
+src/mpv/libmpv/client.h: * for each mpv_suspend() call. Calling mpv_resume() more often than
+src/mpv/libmpv/client.h:void mpv_resume(mpv_handle *ctx);
+src/mpv/libmpv/client.h:     * resume with MPV_EVENT_PLAYBACK_RESTART as soon as the seek is finished.
+src/mpv/libmpv/mpv.def:mpv_resume
+src/mpv/TOOLS/lua/pause-when-minimize.lua:-- This script pauses playback when minimizing the window, and resumes playback
+src/mpv/options/options.h:    int position_resume;
+src/mpv/options/options.c:    OPT_FLAG("resume-playback", position_resume, 0),
+src/mpv/options/options.c:    .position_resume = 1,
+src/mpv/audio/mixer.c:    // Set parameters from playback resume.
+src/mpv/audio/mixer.c:                MP_DBG(mixer, "Restoring volume from resume config.\n");
+src/mpv/audio/out/ao_alsa.c:static void resume_device(struct ao *ao)
+src/mpv/audio/out/ao_alsa.c:        MP_INFO(ao, "PCM in suspend mode, trying to resume.\n");
+src/mpv/audio/out/ao_alsa.c:        while ((err = snd_pcm_resume(p->alsa)) == -EAGAIN)
+src/mpv/audio/out/ao_alsa.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_alsa.c:    resume_device(ao);
+src/mpv/audio/out/ao_alsa.c:            CHECK_ALSA_ERROR("pcm resume error");
+src/mpv/audio/out/ao_alsa.c:        MP_VERBOSE(ao, "resume not supported by hardware\n");
+src/mpv/audio/out/ao_alsa.c:                resume_device(ao);
+src/mpv/audio/out/ao_alsa.c:    .resume    = audio_resume,
+src/mpv/audio/out/ao.h:void ao_resume(struct ao *ao);
+src/mpv/audio/out/internal.h: *          resume
+src/mpv/audio/out/internal.h: *  b) ->play must be NULL. ->resume must be provided, and should make the
+src/mpv/audio/out/internal.h: *          resume      (starts the audio callback)
+src/mpv/audio/out/internal.h: *          reset       (stops the audio callback, resume() restarts it)
+src/mpv/audio/out/internal.h:    // push based: see ao_resume()
+src/mpv/audio/out/internal.h:    void (*resume)(struct ao *ao);
+src/mpv/audio/out/ao_openal.c: * \brief resume playing, after audio_pause()
+src/mpv/audio/out/ao_openal.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_openal.c:    .resume    = audio_resume,
+src/mpv/audio/out/ao_sndio.c: * resume playing, after audio_pause()
+src/mpv/audio/out/ao_sndio.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_sndio.c:    .resume    = audio_resume,
+src/mpv/audio/out/ao_null.c:// resume playing, after pause()
+src/mpv/audio/out/ao_null.c:static void resume(struct ao *ao)
+src/mpv/audio/out/ao_null.c:    resume(ao);
+src/mpv/audio/out/ao_null.c:    .resume    = resume,
+src/mpv/audio/out/ao_wasapi.c:static void thread_resume(struct ao *ao)
+src/mpv/audio/out/ao_wasapi.c:                thread_resume(ao);
+src/mpv/audio/out/ao_wasapi.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_wasapi.c:    .resume         = audio_resume,
+src/mpv/audio/out/ao_pulse.c:static void resume(struct ao *ao)
+src/mpv/audio/out/ao_pulse.c:    .resume    = resume,
+src/mpv/audio/out/ao_sdl.c:static void resume(struct ao *ao)
+src/mpv/audio/out/ao_sdl.c:    .resume    = resume,
+src/mpv/audio/out/ao_rsound.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_rsound.c:    .resume    = audio_resume,
+src/mpv/audio/out/ao_oss.c:// resume playing, after audio_pause()
+src/mpv/audio/out/ao_oss.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_oss.c:    .resume    = audio_resume,
+src/mpv/audio/out/pull.c:        ao->driver->resume(ao);
+src/mpv/audio/out/pull.c:static void resume(struct ao *ao)
+src/mpv/audio/out/pull.c:    ao->driver->resume(ao);
+src/mpv/audio/out/pull.c:    assert(ao->driver->resume);
+src/mpv/audio/out/pull.c:    .resume = resume,
+src/mpv/audio/out/ao_coreaudio.c:    .resume         = start,
+src/mpv/audio/out/push.c:static void resume(struct ao *ao)
+src/mpv/audio/out/push.c:    if (ao->driver->resume)
+src/mpv/audio/out/push.c:        ao->driver->resume(ao);
+src/mpv/audio/out/push.c:    .resume = resume,
+src/mpv/audio/out/ao_coreaudio_exclusive.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_coreaudio_exclusive.c:    .resume    = audio_resume,
+src/mpv/audio/out/ao_jack.c:static void resume(struct ao *ao)
+src/mpv/audio/out/ao_jack.c:    .resume    = resume,
+src/mpv/audio/out/ao.c:void ao_resume(struct ao *ao)
+src/mpv/audio/out/ao.c:    if (ao->api->resume)
+src/mpv/audio/out/ao.c:        ao->api->resume(ao);
+src/mpv/audio/out/ao_dsound.c:\brief resume playing, after audio_pause()
+src/mpv/audio/out/ao_dsound.c:static void audio_resume(struct ao *ao)
+src/mpv/audio/out/ao_dsound.c:    .resume    = audio_resume,
+src/mpv/DOCS/man/ipc.rst:``resume``
+src/mpv/DOCS/man/ipc.rst:    ``resume`` decrements it. When 0 is reached, the player is actually resumed.
+src/mpv/DOCS/man/lua.rst:            ``resume()`` essentially unpauses the timer.
+src/mpv/DOCS/man/lua.rst:            Disable the timer. Resets the elapsed time. ``resume()`` will
+src/mpv/DOCS/man/lua.rst:        ``resume()``
+src/mpv/DOCS/man/lua.rst:            will resume at the time it was stopped. If the timer was disabled
+src/mpv/DOCS/man/lua.rst:            If you write this, you can call ``t:kill() ; t:resume()`` to reset
+src/mpv/DOCS/man/lua.rst:``mp.resume()``
+src/mpv/DOCS/man/lua.rst:    counter, and ``mp.resume()`` decrements it. When 0 is reached, the player
+src/mpv/DOCS/man/lua.rst:    is actually resumed.
+src/mpv/DOCS/man/lua.rst:``mp.resume_all()``
+src/mpv/DOCS/man/lua.rst:    This resets the internal suspend counter and resumes the player. (It's
+src/mpv/DOCS/man/lua.rst:    like calling ``mp.resume()`` until the player is actually resumed.)
+src/mpv/DOCS/man/lua.rst:    This function calls ``mp.suspend()`` and ``mp.resume_all()`` on its own.
+src/mpv/DOCS/man/lua.rst:    In all cases, ``mp.resume_all()`` is implicitly called.
+src/mpv/DOCS/man/options.rst:    configuration files are blocked as well, such as resume playback files.
+src/mpv/DOCS/man/options.rst:``--no-resume-playback``
+src/mpv/DOCS/man/options.rst:    Used internally for use by playback resume (e.g. with ``quit_watch_later``).
+src/mpv/DOCS/man/options.rst:       cache file to resume playback of a stream. (Technically, mpv wouldn't
+src/mpv/DOCS/man/mpv.rst:    later will resume at the old playback position if possible.
+src/mpv/DOCS/man/mpv.rst:    add the media filename to the contents of the resume config file.
+src/mpv/DOCS/man/input.rst:    Write the resume config file that the ``quit-watch-later`` command writes,
+src/mpv/DOCS/man/input.rst:    everything. It's not possible to resume playback in this state.
+src/bomi/player/playengine.cpp:auto PlayEngine::setResume_locked(bool resume) -> void
+src/bomi/player/playengine.cpp:    d->resume = resume;
+src/bomi/player/playengine.hpp:    auto setResume_locked(bool resume) -> void;
+src/bomi/player/mainwindow_p.cpp:            prog->resume();
+src/bomi/player/mainwindow_p.cpp:            prog->resume();
+src/bomi/player/mainwindow_p.cpp:                prog->resume();
+src/bomi/player/mainwindow_p.cpp:        noMessage = false; const auto recorded = e.params()->resume_position() > 0;
+src/bomi/player/mainwindow_p.cpp:        if (!next.isEmpty()) load(next, true, !pref.resume_ignore_in_playlist());
+src/bomi/player/mrlstate.cpp:             u"resume_position"_q, u"edition"_q, u"star"_q };
+src/bomi/player/mrlstate.cpp:    COPY(resume_position);
+src/bomi/player/mrlstate_old.hpp:    P_(int, resume_position, 0, "", 0)
+src/bomi/player/playengine_p.hpp:    bool pauseAfterSkip = false, resume = false, hwdec = false;
+src/bomi/player/playengine_p.hpp:    auto loadfile(const Mrl &mrl, bool resume, const QString &sub = QString()) -> void;
+src/bomi/player/mrlstate.hpp:    P_(int, resume_position, 0, "", 0)
+src/bomi/player/playengine_p.cpp:auto PlayEngine::Data::loadfile(const Mrl &mrl, bool resume, const QString &sub) -> void
+src/bomi/player/playengine_p.cpp:    opts.add("resume-playback", resume);
+src/bomi/player/playengine_p.cpp:    bool found = false, resume = false;
+src/bomi/player/playengine_p.cpp:        local->set_resume_position(-1);
+src/bomi/player/playengine_p.cpp:        resume = mpv.get<bool>("options/resume-playback") && this->resume;
+src/bomi/player/playengine_p.cpp:        if (resume)
+src/bomi/player/playengine_p.cpp:            start = local->resume_position();
+src/bomi/player/playengine_p.cpp:        resume = found = true;
+src/bomi/player/playengine_p.cpp:    if (resume && mrl.isUnique() && !mrl.isImage())
+src/bomi/player/playengine_p.cpp:    t.local->set_resume_position(time);
+src/bomi/player/playengine_p.cpp:            last->set_resume_position(-1);
+src/bomi/player/mainwindow_m.cpp:        { const int pos = e.params()->resume_position(); if (pos > 0) e.seek(pos); });
+src/bomi/pref/pref.hpp:    P0(bool, resume_ignore_in_playlist, false)
+src/bomi/ui/prefdialog.ui:             <widget class="QCheckBox" name="resume_ignore_in_playlist">
+src/bomi/ui/prefdialog.ui:   <receiver>resume_ignore_in_playlist</receiver>
