@@ -110,7 +110,7 @@ public:
         return it != info.cend() ? it->value : def;
     }
     static constexpr auto default_() -> Enum
-    { return StaysOnTop::Playing; }
+    { return StaysOnTop::None; }
 private:
     static const ItemList info;
 };
