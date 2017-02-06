@@ -50,6 +50,18 @@ enum {
     AO_EVENT_HOTPLUG = 2,
 };
 
+enum {
+    // Allow falling back to ao_null if nothing else works.
+    AO_INIT_NULL_FALLBACK = 1 << 0,
+    // Only accept multichannel configurations that are guaranteed to work
+    // (i.e. not sending arbitrary layouts over HDMI).
+    AO_INIT_SAFE_MULTICHANNEL_ONLY = 1 << 1,
+    // Stream silence as long as no audio is playing.
+    AO_INIT_STREAM_SILENCE = 1 << 2,
+    // Force exclusive mode, i.e. lock out the system mixer.
+    AO_INIT_EXCLUSIVE = 1 << 3,
+};
+
 typedef struct ao_control_vol {
     float left;
     float right;
@@ -72,7 +84,8 @@ struct encode_lavc_context;
 struct mp_audio;
 
 struct ao *ao_init_best(struct mpv_global *global,
-                        struct input_ctx *input_ctx,
+                        int init_flags,
+                        void (*wakeup_cb)(void *ctx), void *wakeup_ctx,
                         struct encode_lavc_context *encode_lavc_ctx,
                         int samplerate, int format, struct mp_chmap channels);
 void ao_uninit(struct ao *ao);
@@ -95,7 +108,8 @@ void ao_hotplug_event(struct ao *ao);
 
 struct ao_hotplug;
 struct ao_hotplug *ao_hotplug_create(struct mpv_global *global,
-                                     struct input_ctx *input_ctx);
+                                     void (*wakeup_cb)(void *ctx),
+                                     void *wakeup_ctx);
 void ao_hotplug_destroy(struct ao_hotplug *hp);
 bool ao_hotplug_check_update(struct ao_hotplug *hp);
 const char *ao_hotplug_get_detected_device(struct ao_hotplug *hp);

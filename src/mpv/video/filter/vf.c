@@ -20,6 +20,7 @@
 #include <string.h>
 #include <assert.h>
 #include <sys/types.h>
+#include <libavutil/buffer.h>
 #include <libavutil/common.h>
 #include <libavutil/mem.h>
 
@@ -46,14 +47,10 @@ extern const vf_info_t vf_info_noformat;
 extern const vf_info_t vf_info_flip;
 extern const vf_info_t vf_info_rotate;
 extern const vf_info_t vf_info_mirror;
-extern const vf_info_t vf_info_noise;
 extern const vf_info_t vf_info_eq;
 extern const vf_info_t vf_info_gradfun;
-extern const vf_info_t vf_info_unsharp;
-extern const vf_info_t vf_info_hqdn3d;
 extern const vf_info_t vf_info_dsize;
 extern const vf_info_t vf_info_pullup;
-extern const vf_info_t vf_info_delogo;
 extern const vf_info_t vf_info_sub;
 extern const vf_info_t vf_info_yadif;
 extern const vf_info_t vf_info_stereo3d;
@@ -64,6 +61,7 @@ extern const vf_info_t vf_info_vapoursynth;
 extern const vf_info_t vf_info_vapoursynth_lazy;
 extern const vf_info_t vf_info_vdpaupp;
 extern const vf_info_t vf_info_buffer;
+extern const vf_info_t vf_info_d3d11vpp;
 
 // list of available filters:
 static const vf_info_t *const filter_list[] = {
@@ -74,23 +72,17 @@ static const vf_info_t *const filter_list[] = {
     &vf_info_noformat,
     &vf_info_flip,
 
-#if HAVE_LIBAVFILTER
     &vf_info_mirror,
     &vf_info_lavfi,
     &vf_info_rotate,
-    &vf_info_noise,
     &vf_info_gradfun,
-    &vf_info_unsharp,
-    &vf_info_hqdn3d,
     &vf_info_pullup,
-    &vf_info_delogo,
     &vf_info_yadif,
-#endif
+    &vf_info_stereo3d,
 
     &vf_info_eq,
     &vf_info_dsize,
     &vf_info_sub,
-    &vf_info_stereo3d,
     &vf_info_buffer,
 #if HAVE_DLOPEN
     &vf_info_dlopen,
@@ -101,11 +93,14 @@ static const vf_info_t *const filter_list[] = {
 #if HAVE_VAPOURSYNTH_CORE && HAVE_VAPOURSYNTH_LAZY
     &vf_info_vapoursynth_lazy,
 #endif
-#if HAVE_VAAPI_VPP
+#if HAVE_VAAPI
     &vf_info_vaapi,
 #endif
 #if HAVE_VDPAU
     &vf_info_vdpaupp,
+#endif
+#if HAVE_D3D_HWACCEL
+    &vf_info_d3d11vpp,
 #endif
     NULL
 };
@@ -169,6 +164,17 @@ static void vf_control_all(struct vf_chain *c, int cmd, void *arg)
     }
 }
 
+int vf_send_command(struct vf_chain *c, char *label, char *cmd, char *arg)
+{
+    char *args[2] = {cmd, arg};
+    if (strcmp(label, "all") == 0) {
+        vf_control_all(c, VFCTRL_COMMAND, args);
+        return 0;
+    } else {
+        return vf_control_by_label(c, VFCTRL_COMMAND, args, bstr0(label));
+    }
+}
+
 static void vf_fix_img_params(struct mp_image *img, struct mp_image_params *p)
 {
     // Filters must absolutely set these correctly.
@@ -217,14 +223,11 @@ void vf_print_filter_chain(struct vf_chain *c, int msglevel,
     if (!mp_msg_test(c->log, msglevel))
         return;
 
-    char b[128] = {0};
-
-    mp_snprintf_cat(b, sizeof(b), "%s", mp_image_params_to_str(&c->input_params));
-    mp_msg(c->log, msglevel, "  [vd] %s\n", b);
-
     for (vf_instance_t *f = c->first; f; f = f->next) {
-        b[0] = '\0';
+        char b[128] = {0};
         mp_snprintf_cat(b, sizeof(b), "  [%s] ", f->info->name);
+        if (f->label)
+            mp_snprintf_cat(b, sizeof(b), "\"%s\" ", f->label);
         mp_snprintf_cat(b, sizeof(b), "%s", mp_image_params_to_str(&f->fmt_out));
         if (f->autoinserted)
             mp_snprintf_cat(b, sizeof(b), " [a]");
@@ -246,15 +249,15 @@ static struct vf_instance *vf_open(struct vf_chain *c, const char *name,
     *vf = (vf_instance_t) {
         .info = desc.p,
         .log = mp_log_new(vf, c->log, name),
-        .hwdec = c->hwdec,
+        .hwdec_devs = c->hwdec_devs,
         .query_format = vf_default_query_format,
         .out_pool = talloc_steal(vf, mp_image_pool_new(16)),
         .chain = c,
     };
-    struct m_config *config = m_config_from_obj_desc(vf, vf->log, &desc);
-    if (m_config_apply_defaults(config, name, c->opts->vf_defs) < 0)
-        goto error;
-    if (m_config_set_obj_params(config, args) < 0)
+    struct m_config *config =
+        m_config_from_obj_desc_and_args(vf, vf->log, c->global, &desc,
+                                        name, c->opts->vf_defs, args);
+    if (!config)
         goto error;
     vf->priv = config->optstruct;
     int retcode = vf->info->open(vf);
@@ -275,12 +278,15 @@ static vf_instance_t *vf_open_filter(struct vf_chain *c, const char *name,
     for (i = 0; args && args[2 * i]; i++)
         l += 1 + strlen(args[2 * i]) + 1 + strlen(args[2 * i + 1]);
     l += strlen(name);
-    char str[l + 1];
+    char *str = malloc(l + 1);
+    if (!str)
+        return NULL;
     char *p = str;
     p += sprintf(str, "%s", name);
     for (i = 0; args && args[2 * i]; i++)
         p += sprintf(p, " %s=%s", args[2 * i], args[2 * i + 1]);
     MP_INFO(c, "Opening video filter: [%s]\n", str);
+    free(str);
     return vf_open(c, name, args);
 }
 
@@ -293,6 +299,7 @@ void vf_remove_filter(struct vf_chain *c, struct vf_instance *vf)
     assert(prev); // not inserted
     prev->next = vf->next;
     vf_uninit_filter(vf);
+    c->initialized = 0;
 }
 
 struct vf_instance *vf_append_filter(struct vf_chain *c, const char *name,
@@ -307,6 +314,7 @@ struct vf_instance *vf_append_filter(struct vf_chain *c, const char *name,
             pprev = &(*pprev)->next;
         vf->next = *pprev ? *pprev : NULL;
         *pprev = vf;
+        c->initialized = 0;
     }
     return vf;
 }
@@ -395,7 +403,6 @@ int vf_filter_frame(struct vf_chain *c, struct mp_image *img)
         return -1;
     }
     assert(mp_image_params_equal(&img->params, &c->input_params));
-    vf_fix_img_params(img, &c->override_params);
     return vf_do_filter(c->first, img);
 }
 
@@ -450,6 +457,13 @@ struct mp_image *vf_read_output_frame(struct vf_chain *c)
     return vf_dequeue_output_frame(c->last);
 }
 
+// Undo the previous vf_read_output_frame().
+void vf_unread_output_frame(struct vf_chain *c, struct mp_image *img)
+{
+    struct vf_instance *vf = c->last;
+    MP_TARRAY_INSERT_AT(vf, vf->out_queued, vf->num_out_queued, 0, img);
+}
+
 // Some filters (vf_vapoursynth) filter on separate threads, and may need new
 // input from the decoder, even though the core does not need a new output image
 // yet (this is required to get proper pipelining in the filter). If the filter
@@ -497,19 +511,6 @@ void vf_seek_reset(struct vf_chain *c)
     vf_chain_forget_frames(c);
 }
 
-int vf_next_config(struct vf_instance *vf,
-                   int width, int height, int d_width, int d_height,
-                   unsigned int voflags, unsigned int outfmt)
-{
-    vf->fmt_out = vf->fmt_in;
-    vf->fmt_out.imgfmt = outfmt;
-    vf->fmt_out.w = width;
-    vf->fmt_out.h = height;
-    vf->fmt_out.d_w = d_width;
-    vf->fmt_out.d_h = d_height;
-    return 1;
-}
-
 int vf_next_query_format(struct vf_instance *vf, unsigned int fmt)
 {
     return fmt >= IMGFMT_START && fmt < IMGFMT_END
@@ -527,7 +528,23 @@ static void query_formats(uint8_t *fmts, struct vf_instance *vf)
 
 static bool is_conv_filter(struct vf_instance *vf)
 {
-    return vf && strcmp(vf->info->name, "scale") == 0;
+    return vf && (strcmp(vf->info->name, "scale") == 0 || vf->autoinserted);
+}
+
+static const char *find_conv_filter(uint8_t *fmts_in, uint8_t *fmts_out)
+{
+    for (int n = 0; filter_list[n]; n++) {
+        if (filter_list[n]->test_conversion) {
+            for (int a = IMGFMT_START; a < IMGFMT_END; a++) {
+                for (int b = IMGFMT_START; b < IMGFMT_END; b++) {
+                    if (fmts_in[a - IMGFMT_START] && fmts_out[b - IMGFMT_START] &&
+                        filter_list[n]->test_conversion(a, b))
+                        return filter_list[n]->name;
+                }
+            }
+        }
+    }
+    return "scale";
 }
 
 static void update_formats(struct vf_chain *c, struct vf_instance *vf,
@@ -548,7 +565,18 @@ static void update_formats(struct vf_chain *c, struct vf_instance *vf,
         // filters after vf work, but vf can't output any format the filters
         // after it accept), try to insert a conversion filter.
         MP_INFO(c, "Using conversion filter.\n");
-        struct vf_instance *conv = vf_open(c, "scale", NULL);
+        // Determine which output formats the filter _could_ accept. For this
+        // to work after the conversion filter is inserted, it is assumed that
+        // conversion filters have a single set of in/output formats that can
+        // be converted to each other.
+        uint8_t out_formats[IMGFMT_END - IMGFMT_START];
+        for (int n = IMGFMT_START; n < IMGFMT_END; n++) {
+            out_formats[n - IMGFMT_START] = vf->last_outfmts[n - IMGFMT_START];
+            vf->last_outfmts[n - IMGFMT_START] = 1;
+        }
+        query_formats(fmts, vf);
+        const char *filter = find_conv_filter(fmts, out_formats);
+        struct vf_instance *conv = vf_open(c, filter, NULL);
         if (conv) {
             conv->autoinserted = true;
             conv->next = vf->next;
@@ -584,14 +612,9 @@ static int vf_reconfig_wrapper(struct vf_instance *vf,
     if (!mp_image_params_valid(&vf->fmt_in))
         return -2;
 
-    int r;
-    if (vf->reconfig) {
+    int r = 0;
+    if (vf->reconfig)
         r = vf->reconfig(vf, &vf->fmt_in, &vf->fmt_out);
-    } else if (vf->config) {
-        r = vf->config(vf, p->w, p->h, p->d_w, p->d_h, 0, p->imgfmt) ? 0 : -1;
-    } else {
-        r = 0;
-    }
 
     if (!mp_image_params_equal(&vf->fmt_in, p))
         r = -2;
@@ -606,13 +629,10 @@ static int vf_reconfig_wrapper(struct vf_instance *vf,
     return r;
 }
 
-// override_params is used to forcibly change the parameters of input images,
-// while params has to match the input images exactly.
-int vf_reconfig(struct vf_chain *c, const struct mp_image_params *params,
-                const struct mp_image_params *override_params)
+int vf_reconfig(struct vf_chain *c, const struct mp_image_params *params)
 {
     int r = 0;
-    vf_chain_forget_frames(c);
+    vf_seek_reset(c);
     for (struct vf_instance *vf = c->first; vf; ) {
         struct vf_instance *next = vf->next;
         if (vf->autoinserted)
@@ -620,20 +640,25 @@ int vf_reconfig(struct vf_chain *c, const struct mp_image_params *params,
         vf = next;
     }
     c->input_params = *params;
-    c->first->fmt_in = *override_params;
-    c->override_params = *override_params;
-    struct mp_image_params cur = c->override_params;
+    c->first->fmt_in = *params;
+    struct mp_image_params cur = *params;
 
     uint8_t unused[IMGFMT_END - IMGFMT_START];
     update_formats(c, c->first, unused);
+    AVBufferRef *hwfctx = c->in_hwframes_ref;
     struct vf_instance *failing = NULL;
     for (struct vf_instance *vf = c->first; vf; vf = vf->next) {
+        av_buffer_unref(&vf->in_hwframes_ref);
+        av_buffer_unref(&vf->out_hwframes_ref);
+        vf->in_hwframes_ref = hwfctx ? av_buffer_ref(hwfctx) : NULL;
+        vf->out_hwframes_ref = hwfctx ? av_buffer_ref(hwfctx) : NULL;
         r = vf_reconfig_wrapper(vf, &cur);
         if (r < 0) {
             failing = vf;
             break;
         }
         cur = vf->fmt_out;
+        hwfctx = vf->out_hwframes_ref;
     }
     c->output_params = cur;
     c->initialized = r < 0 ? -1 : 1;
@@ -642,11 +667,16 @@ int vf_reconfig(struct vf_chain *c, const struct mp_image_params *params,
         MP_ERR(c, "Image formats incompatible or invalid.\n");
     mp_msg(c->log, loglevel, "Video filter chain:\n");
     vf_print_filter_chain(c, loglevel, failing);
-    if (r < 0) {
-        c->input_params = c->override_params = c->output_params =
-            (struct mp_image_params){0};
-    }
+    if (r < 0)
+        c->output_params = (struct mp_image_params){0};
     return r;
+}
+
+// Hack to get mp_image.hwctx before vf_reconfig()
+void vf_set_proto_frame(struct vf_chain *c, struct mp_image *img)
+{
+    av_buffer_unref(&c->in_hwframes_ref);
+    c->in_hwframes_ref = img && img->hwctx ? av_buffer_ref(img->hwctx) : NULL;
 }
 
 struct vf_instance *vf_find_by_label(struct vf_chain *c, const char *label)
@@ -662,6 +692,8 @@ struct vf_instance *vf_find_by_label(struct vf_chain *c, const char *label)
 
 static void vf_uninit_filter(vf_instance_t *vf)
 {
+    av_buffer_unref(&vf->in_hwframes_ref);
+    av_buffer_unref(&vf->out_hwframes_ref);
     if (vf->uninit)
         vf->uninit(vf);
     vf_forget_frames(vf);
@@ -713,6 +745,7 @@ void vf_destroy(struct vf_chain *c)
 {
     if (!c)
         return;
+    av_buffer_unref(&c->in_hwframes_ref);
     while (c->first) {
         vf_instance_t *vf = c->first;
         c->first = vf->next;
@@ -720,29 +753,4 @@ void vf_destroy(struct vf_chain *c)
     }
     vf_chain_forget_frames(c);
     talloc_free(c);
-}
-
-// When changing the size of an image that had old_w/old_h with
-// DAR *d_width/*d_height to the new size new_w/new_h, adjust
-// *d_width/*d_height such that the new image has the same pixel aspect ratio.
-void vf_rescale_dsize(int *d_width, int *d_height, int old_w, int old_h,
-                      int new_w, int new_h)
-{
-    *d_width  = *d_width  * new_w / old_w;
-    *d_height = *d_height * new_h / old_h;
-}
-
-// Set *d_width/*d_height to display aspect ratio with the givem source size
-void vf_set_dar(int *d_w, int *d_h, int w, int h, double dar)
-{
-    *d_w = w;
-    *d_h = h;
-    if (dar > 0.01) {
-        *d_w = h * dar + 0.5;
-        // we don't like horizontal downscale
-        if (*d_w < w) {
-            *d_w = w;
-            *d_h = w / dar + 0.5;
-        }
-    }
 }

@@ -4,8 +4,15 @@
 -- alphabetically, and adds entries before and after the current file to
 -- the internal playlist. (It stops if the it would add an already existing
 -- playlist entry at the same position - this makes it "stable".)
--- Add at most 5 * 2 files when starting a file (before + after).
-MAXENTRIES = 5
+-- Add at most 5000 * 2 files when starting a file (before + after).
+MAXENTRIES = 5000
+
+local options = require 'mp.options'
+
+o = {
+    disabled = false
+}
+options.read_options(o)
 
 function Set (t)
     local set = {}
@@ -25,12 +32,17 @@ function add_files_at(index, files)
     local oldcount = mp.get_property_number("playlist-count", 1)
     for i = 1, #files do
         mp.commandv("loadfile", files[i], "append")
-        mp.commandv("playlist_move", oldcount + i - 1, index + i - 1)
+        mp.commandv("playlist-move", oldcount + i - 1, index + i - 1)
     end
 end
 
 function get_extension(path)
-    return string.match(path, "%.([^%.]+)$" )
+    match = string.match(path, "%.([^%.]+)$" )
+    if match == nil then
+        return "nomatch"
+    else
+        return match
+    end
 end
 
 table.filter = function(t, iter)
@@ -44,8 +56,15 @@ end
 function find_and_add_entries()
     local path = mp.get_property("path", "")
     local dir, filename = mputils.split_path(path)
-    if #dir == 0 then
+    if o.disabled or #dir == 0 then
         return
+    end
+    local pl_count = mp.get_property_number("playlist-count", 1)
+    if (pl_count > 1 and autoload == nil) or
+       (pl_count == 1 and EXTENSIONS[string.lower(get_extension(filename))] == nil) then
+        return
+    else
+        autoload = true
     end
 
     local files = mputils.readdir(dir, "files")
@@ -60,6 +79,11 @@ function find_and_add_entries()
         return EXTENSIONS[string.lower(ext)]
     end)
     table.sort(files, function (a, b)
+        local len = string.len(a) - string.len(b)
+        if len ~= 0 then -- case for ordering filename ending with such as X.Y.Z
+            local ext = string.len(get_extension(a)) + 1
+            return string.sub(a, 1, -ext) < string.sub(b, 1, -ext)
+        end
         return string.lower(a) < string.lower(b)
     end)
 

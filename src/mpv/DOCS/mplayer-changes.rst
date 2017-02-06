@@ -7,8 +7,8 @@ large part of which is incompatible or completely changes how the player
 behaves. Although there are still many similarities to its ancestors, **mpv**
 should generally be treated as a completely different program.
 
-.. note::
-    These lists are incomplete.
+.. admonition:: Warning
+    This document is not updated anymore, and is incomplete and outdated.
 
 General Changes from MPlayer to mpv
 -----------------------------------
@@ -30,7 +30,7 @@ Player
 * Slave mode compatibility broken (see below).
 * Re-enable screensaver while the player is paused.
 * Allow resuming playback at a later point with ``Shift+q``, also see the
-  ``quit_watch_later`` input command.
+  ``quit-watch-later`` input command.
 * ``--keep-open`` option to stop the player from closing the window and
   exiting after playback ends.
 * A client API, that allows embedding **mpv** into applications
@@ -79,7 +79,8 @@ Video
   using most of FFmpeg's filters, which improve greatly on the old MPlayer
   filters in features, performance, and correctness.
 * More correct color reproduction (color matrix generation), including support
-  for BT.2020 (Ultra HD) and linear XYZ (Digital Cinema) inputs.
+  for BT.2020 (Ultra HD). linear XYZ (Digital Cinema) and SMPTE ST2084 (HDR)
+  inputs.
 * Support for color managed displays, via ICC profiles.
 * High-quality image resamplers (see the ``opengl`` ``scale`` suboption).
 * Support for scaling in (sigmoidized) linear light.
@@ -94,6 +95,8 @@ Video
 
 * Image subtitles (DVDs etc.) are rendered in color and use more correct
   positioning (color for image subs can be disabled with ``--sub-gray``).
+* Support for the X11 video output is removed, since it was considered
+  deprecated. SDL video output can still be used as a fallback.
 
 OSD and terminal
 ~~~~~~~~~~~~~~~~
@@ -259,13 +262,14 @@ Command Line Switches
     ``-ssf <sub>``              ``--sws-...``
     ``-stop-xscreensaver``      ``--stop-screensaver``
     ``-sub-fuzziness``          ``--sub-auto``
+    ``-sub-text-*``             ``--sub-*``
     ``-sub``                    ``--sub-file``
     ``-subcp``                  ``--sub-codepage``
     ``-subdelay``               ``--sub-delay``
     ``-subfile``                ``--sub-file``
-    ``-subfont-*``              ``--sub-text-*``, ``--osd-*``
+    ``-subfont-*``              ``--sub-*``, ``--osd-*``
     ``-subfont-text-scale``     ``--sub-scale``
-    ``-subfont``                ``--sub-text-font``
+    ``-subfont``                ``--sub-font``
     ``-subfps``                 ``--sub-fps``
     ``-subpos``                 ``--sub-pos``
     ``-sws``                    ``--sws-scaler``
@@ -277,7 +281,7 @@ Command Line Switches
     ``-xineramascreen``         ``--screen`` (different values)
     ``-xy W``                   ``--autofit=W``
     ``-zoom``                   Inverse available as ``--video-unscaled``
-    ``dvdnav://``               ``dvdnav://menu``
+    ``dvdnav://``               Removed.
     ``dvd://1``                 ``dvd://0`` (0-based offset)
     =========================== ========================================
 
@@ -309,11 +313,11 @@ input.conf and Slave Commands
     +--------------------------------+----------------------------------------+
     | Old                            | New                                    |
     +================================+========================================+
-    | ``pt_step 1 [0|1]``            | ``playlist_next [weak|force]``         |
+    | ``pt_step 1 [0|1]``            | ``playlist-next [weak|force]``         |
     |                                | (translation layer cannot deal with    |
     |                                | whitespace)                            |
     +--------------------------------+----------------------------------------+
-    | ``pt_step -1 [0|1]``           | ``playlist_prev [weak|force] (same)``  |
+    | ``pt_step -1 [0|1]``           | ``playlist-prev [weak|force] (same)``  |
     +--------------------------------+----------------------------------------+
     | ``switch_ratio [<ratio>]``     | ``set video-aspect <ratio>``           |
     |                                |                                        |
@@ -328,7 +332,7 @@ input.conf and Slave Commands
     | ``<step> <dir>``               | ``no-osd``: ``no-osd cycle <prop>``    |
     |                                | ``<step>``                             |
     +--------------------------------+----------------------------------------+
-    | ``osd_show_property_text``     | ``show_text <text>``                   |
+    | ``osd_show_property_text``     | ``show-text <text>``                   |
     | ``<text>``                     | The property expansion format string   |
     |                                | syntax slightly changed.               |
     +--------------------------------+----------------------------------------+
@@ -337,9 +341,9 @@ input.conf and Slave Commands
     |                                | ``raw`` prefix to disable property     |
     |                                | expansion.                             |
     +--------------------------------+----------------------------------------+
-    | ``show_tracks``                | ``show_text ${track-list}``            |
+    | ``show_tracks``                | ``show-text ${track-list}``            |
     +--------------------------------+----------------------------------------+
-    | ``show_chapters``              | ``show_text ${chapter-list}``          |
+    | ``show_chapters``              | ``show-text ${chapter-list}``          |
     +--------------------------------+----------------------------------------+
     | ``af_switch``, ``af_add``, ... | ``af set|add|...``                     |
     +--------------------------------+----------------------------------------+
@@ -397,7 +401,7 @@ Slave mode
 
   Assuming the system supports ``/dev/stdin``.
 
-  (The option was readded in 0.5.1 and sets exactly these options. It was
+  (The option was added back in 0.5.1 and sets exactly these options. It was
   removed in 0.10.x again.)
 
 * A JSON RPC protocol giving access to the client API is also supported. See

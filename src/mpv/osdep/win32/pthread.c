@@ -18,27 +18,6 @@
 #include <errno.h>
 #include <sys/time.h>
 
-// We keep this around to avoid active waiting while handling static
-// initializers.
-static pthread_once_t init_cs_once = PTHREAD_ONCE_INIT;
-static CRITICAL_SECTION init_cs;
-
-static void init_init_cs(void)
-{
-    InitializeCriticalSection(&init_cs);
-}
-
-static void init_lock(void)
-{
-    pthread_once(&init_cs_once, init_init_cs);
-    EnterCriticalSection(&init_cs);
-}
-
-static void init_unlock(void)
-{
-    LeaveCriticalSection(&init_cs);
-}
-
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 {
     BOOL pending;
@@ -53,33 +32,40 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 
 int pthread_mutex_destroy(pthread_mutex_t *mutex)
 {
-    DeleteCriticalSection(&mutex->cs);
+    if (mutex->use_cs)
+        DeleteCriticalSection(&mutex->lock.cs);
     return 0;
 }
 
 int pthread_mutex_init(pthread_mutex_t *restrict mutex,
                        const pthread_mutexattr_t *restrict attr)
 {
-    InitializeCriticalSection(&mutex->cs);
+    mutex->use_cs = attr && (*attr & PTHREAD_MUTEX_RECURSIVE);
+    if (mutex->use_cs) {
+        InitializeCriticalSection(&mutex->lock.cs);
+    } else {
+        InitializeSRWLock(&mutex->lock.srw);
+    }
     return 0;
 }
 
 int pthread_mutex_lock(pthread_mutex_t *mutex)
 {
-    if (mutex->requires_init) {
-        init_lock();
-        if (mutex->requires_init)
-            InitializeCriticalSection(&mutex->cs);
-        _InterlockedAnd(&mutex->requires_init, 0);
-        init_unlock();
+    if (mutex->use_cs) {
+        EnterCriticalSection(&mutex->lock.cs);
+    } else {
+        AcquireSRWLockExclusive(&mutex->lock.srw);
     }
-    EnterCriticalSection(&mutex->cs);
     return 0;
 }
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
-    LeaveCriticalSection(&mutex->cs);
+    if (mutex->use_cs) {
+        LeaveCriticalSection(&mutex->lock.cs);
+    } else {
+        ReleaseSRWLockExclusive(&mutex->lock.srw);
+    }
     return 0;
 }
 
@@ -87,7 +73,13 @@ static int cond_wait(pthread_cond_t *restrict cond,
                      pthread_mutex_t *restrict mutex,
                      DWORD ms)
 {
-    return SleepConditionVariableCS(cond, &mutex->cs, ms) ? 0 : ETIMEDOUT;
+    BOOL res;
+    if (mutex->use_cs) {
+        res = SleepConditionVariableCS(cond, &mutex->lock.cs, ms);
+    } else {
+        res = SleepConditionVariableSRW(cond, &mutex->lock.srw, ms, 0);
+    }
+    return res ? 0 : ETIMEDOUT;
 }
 
 int pthread_cond_timedwait(pthread_cond_t *restrict cond,

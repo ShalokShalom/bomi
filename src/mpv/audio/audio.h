@@ -35,7 +35,9 @@ struct mp_audio {
     int nch;            // number of channels (redundant with chmap)
     int spf;            // sub-samples per sample on each plane
     int num_planes;     // number of planes
-    int bps;            // size of sub-samples (af_fmt2bps(format))
+    int bps;            // size of sub-samples (af_fmt_to_bytes(format))
+
+    double pts;         // currently invalid within the filter chain
 
     // --- private
     // These do not necessarily map directly to planes[]. They can have
@@ -46,7 +48,6 @@ struct mp_audio {
 
 void mp_audio_set_format(struct mp_audio *mpa, int format);
 void mp_audio_set_num_channels(struct mp_audio *mpa, int num_channels);
-void mp_audio_set_channels_old(struct mp_audio *mpa, int num_channels);
 void mp_audio_set_channels(struct mp_audio *mpa, const struct mp_chmap *chmap);
 void mp_audio_copy_config(struct mp_audio *dst, const struct mp_audio *src);
 bool mp_audio_config_equals(const struct mp_audio *a, const struct mp_audio *b);
@@ -71,12 +72,16 @@ void mp_audio_copy(struct mp_audio *dst, int dst_offset,
                    struct mp_audio *src, int src_offset, int length);
 void mp_audio_copy_attributes(struct mp_audio *dst, struct mp_audio *src);
 void mp_audio_skip_samples(struct mp_audio *data, int samples);
+void mp_audio_clip_timestamps(struct mp_audio *f, double start, double end);
+double mp_audio_end_pts(struct mp_audio *data);
 
 bool mp_audio_is_writeable(struct mp_audio *data);
 int mp_audio_make_writeable(struct mp_audio *data);
 
 struct AVFrame;
 struct mp_audio *mp_audio_from_avframe(struct AVFrame *avframe);
+struct AVFrame *mp_audio_to_avframe_and_unref(struct mp_audio *frame);
+int mp_audio_to_avframe(struct mp_audio *frame, struct AVFrame *avframe);
 
 struct mp_audio_pool;
 struct mp_audio_pool *mp_audio_pool_create(void *ta_parent);

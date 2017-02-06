@@ -58,7 +58,7 @@ static int query_format(struct vo *vo, int format)
     return 1;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     return 0;
 }
@@ -101,4 +101,5 @@ const struct vo_driver video_out_null = {
         OPT_DOUBLE("fps", cfg_fps, M_OPT_RANGE, .min = 0, .max = 10000),
         {0},
     },
+    .options_prefix = "vo-null",
 };

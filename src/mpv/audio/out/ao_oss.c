@@ -184,7 +184,7 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
             return CONTROL_OK;
 #endif
 
-        if (AF_FORMAT_IS_SPECIAL(ao->format))
+        if (!af_fmt_is_pcm(ao->format))
             return CONTROL_TRUE;
 
         if ((fd = open(p->oss_mixer_device, O_RDONLY)) != -1) {
@@ -247,7 +247,7 @@ static bool try_format(struct ao *ao, int *format)
     struct priv *p = ao->priv;
 
     int oss_format = format2oss(*format);
-    if (oss_format == -1 && AF_FORMAT_IS_IEC61937(*format))
+    if (oss_format == -1 && af_fmt_is_spdif(*format))
         oss_format = AFMT_AC3;
 
     if (oss_format == -1) {
@@ -303,7 +303,7 @@ static int reopen_device(struct ao *ao, bool allow_format_changes)
     fcntl(p->audio_fd, F_SETFD, FD_CLOEXEC);
 #endif
 
-    if (AF_FORMAT_IS_IEC61937(format)) {
+    if (af_fmt_is_spdif(format)) {
         if (ioctl(p->audio_fd, SNDCTL_DSP_SPEED, &samplerate) == -1)
             goto fail;
         // Probably could be fixed by setting number of channels; needs testing.
@@ -313,7 +313,8 @@ static int reopen_device(struct ao *ao, bool allow_format_changes)
         }
     }
 
-    int try_formats[] = {format, AF_FORMAT_S32, AF_FORMAT_S24, AF_FORMAT_S16, 0};
+    int try_formats[AF_FORMAT_COUNT];
+    af_get_best_sample_formats(format, try_formats);
     for (int n = 0; try_formats[n]; n++) {
         format = try_formats[n];
         if (try_format(ao, &format))
@@ -327,7 +328,7 @@ static int reopen_device(struct ao *ao, bool allow_format_changes)
 
     MP_VERBOSE(ao, "sample format: %s\n", af_fmt_to_str(format));
 
-    if (!AF_FORMAT_IS_IEC61937(format)) {
+    if (!af_fmt_is_spdif(format)) {
         struct mp_chmap_sel sel = {0};
         for (int n = 0; n < MP_NUM_CHANNELS + 1; n++)
             mp_chmap_sel_add_map(&sel, &oss_layouts[n]);
@@ -392,7 +393,7 @@ static int reopen_device(struct ao *ao, bool allow_format_changes)
         }
     }
 
-    p->outburst -= p->outburst % (channels.num * af_fmt2bps(format)); // round down
+    p->outburst -= p->outburst % (channels.num * af_fmt_to_bytes(format)); // round down
 
     return 0;
 
@@ -461,7 +462,7 @@ static int init(struct ao *ao)
         p->buffersize = 0;
         memset(data, 0, p->outburst);
         while (p->buffersize < 0x40000 && device_writable(ao) > 0) {
-            write(p->audio_fd, data, p->outburst);
+            (void)write(p->audio_fd, data, p->outburst);
             p->buffersize += p->outburst;
         }
         free(data);
@@ -611,6 +612,12 @@ static int audio_wait(struct ao *ao, pthread_mutex_t *lock)
     return r;
 }
 
+static void list_devs(struct ao *ao, struct ao_device_list *list)
+{
+    if (stat(PATH_DEV_DSP, &(struct stat){0}) == 0)
+        ao_device_list_add(list, ao, &(struct ao_device_desc){"", "Default"});
+}
+
 #define OPT_BASE_STRUCT struct priv
 
 const struct ao_driver audio_out_oss = {
@@ -628,6 +635,7 @@ const struct ao_driver audio_out_oss = {
     .drain     = drain,
     .wait      = audio_wait,
     .wakeup    = ao_wakeup_poll,
+    .list_devs = list_devs,
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .audio_fd = -1,
@@ -640,9 +648,10 @@ const struct ao_driver audio_out_oss = {
         .oss_mixer_device = PATH_DEV_MIXER,
     },
     .options = (const struct m_option[]) {
-        OPT_STRING("device", dsp, 0),
+        OPT_STRING("device", dsp, 0, DEVICE_OPT_DEPRECATION),
         OPT_STRING("mixer-device", oss_mixer_device, 0),
         OPT_STRING("mixer-channel", cfg_oss_mixer_channel, 0),
         {0}
     },
+    .options_prefix = "oss",
 };

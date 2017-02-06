@@ -7,7 +7,17 @@
 
 #include "demux/stheader.h"
 #include "video/mp_image.h"
+#include "video/mp_image_pool.h"
 #include "video/hwdec.h"
+
+#define HWDEC_DELAY_QUEUE_COUNT 2
+
+// Maximum number of surfaces the player wants to buffer.
+// This number might require adjustment depending on whatever the player does;
+// for example, if vo_opengl increases the number of reference surfaces for
+// interpolation, this value has to be increased too.
+// This value does not yet include HWDEC_DELAY_QUEUE_COUNT.
+#define HWDEC_EXTRA_SURFACES 4
 
 typedef struct lavc_ctx {
     struct mp_log *log;
@@ -15,14 +25,32 @@ typedef struct lavc_ctx {
     AVCodecContext *avctx;
     AVFrame *pic;
     struct vd_lavc_hwdec *hwdec;
+    AVRational codec_timebase;
     enum AVPixelFormat pix_fmt;
-    int best_csp;
     enum AVDiscard skip_frame;
-    const char *software_fallback_decoder;
+    bool flushing;
+    const char *decoder;
     bool hwdec_failed;
+    bool hwdec_notified;
+
+    int framedrop_flags;
+
+    // For HDR side-data caching
+    double cached_hdr_peak;
+
+    bool hw_probing;
+    struct demux_packet **sent_packets;
+    int num_sent_packets;
+
+    struct demux_packet **requeue_packets;
+    int num_requeue_packets;
+
+    struct mp_image **delay_queue;
+    int num_delay_queue;
+    int max_delay_queue;
 
     // From VO
-    struct mp_hwdec_info *hwdec_info;
+    struct mp_hwdec_devices *hwdec_devs;
 
     // For free use by hwdec implementation
     void *hwdec_priv;
@@ -33,6 +61,11 @@ typedef struct lavc_ctx {
     int hwdec_profile;
 
     bool hwdec_request_reinit;
+    int hwdec_fail_count;
+
+    struct mp_image_pool *hwdec_swpool;
+
+    AVBufferRef *cached_hw_frames_ctx;
 } vd_ffmpeg_ctx;
 
 struct vd_lavc_hwdec {
@@ -40,22 +73,34 @@ struct vd_lavc_hwdec {
     // If not-0: the IMGFMT_ format that should be accepted in the libavcodec
     // get_format callback.
     int image_format;
-    int (*probe)(struct vd_lavc_hwdec *hwdec, struct mp_hwdec_info *info,
-                 const char *decoder);
+    // Always returns a non-hwaccel image format.
+    bool copying;
+    // Setting this will queue the given number of frames before calling
+    // process_image() or returning them to the renderer. This can increase
+    // efficiency by not blocking on the hardware pipeline by reading back
+    // immediately after decoding.
+    int delay_queue;
+    // If true, AVCodecContext will destroy the underlying decoder.
+    bool volatile_context;
+    int (*probe)(struct lavc_ctx *ctx, struct vd_lavc_hwdec *hwdec,
+                 const char *codec);
     int (*init)(struct lavc_ctx *ctx);
-    int (*init_decoder)(struct lavc_ctx *ctx, int fmt, int w, int h);
+    int (*init_decoder)(struct lavc_ctx *ctx, int w, int h);
     void (*uninit)(struct lavc_ctx *ctx);
     // Note: if init_decoder is set, this will always use the values from the
     //       last successful init_decoder call. Otherwise, it's up to you.
-    struct mp_image *(*allocate_image)(struct lavc_ctx *ctx, int fmt,
-                                       int w, int h);
+    struct mp_image *(*allocate_image)(struct lavc_ctx *ctx, int w, int h);
     // Process the image returned by the libavcodec decoder.
     struct mp_image *(*process_image)(struct lavc_ctx *ctx, struct mp_image *img);
     // For horrible Intel shit-drivers only
     void (*lock)(struct lavc_ctx *ctx);
     void (*unlock)(struct lavc_ctx *ctx);
     // Optional; if a special hardware decoder is needed (instead of "hwaccel").
-    const char *(*get_codec)(struct lavc_ctx *ctx);
+    const char *(*get_codec)(struct lavc_ctx *ctx, const char *codec);
+    // Suffix for libavcodec decoder. If non-NULL, get_codec() is overridden
+    // with hwdec_find_decoder.
+    // Intuitively, this will force the corresponding wrapper decoder.
+    const char *lavc_suffix;
 };
 
 enum {
@@ -72,8 +117,12 @@ struct hwdec_profile_entry {
 
 const struct hwdec_profile_entry *hwdec_find_profile(
     struct lavc_ctx *ctx, const struct hwdec_profile_entry *table);
-bool hwdec_check_codec_support(const char *decoder,
+bool hwdec_check_codec_support(const char *codec,
                                const struct hwdec_profile_entry *table);
 int hwdec_get_max_refs(struct lavc_ctx *ctx);
+int hwdec_setup_hw_frames_ctx(struct lavc_ctx *ctx, AVBufferRef *device_ctx,
+                              int av_sw_format, int initial_pool_size);
+
+const char *hwdec_find_decoder(const char *codec, const char *suffix);
 
 #endif

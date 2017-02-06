@@ -55,12 +55,8 @@ static int64_t ca_get_hardware_latency(struct ao *ao) {
             &size);
     CHECK_CA_ERROR("cannot get audio unit latency");
 
-    uint32_t frames = 0;
-    err = CA_GET_O(p->device, kAudioDevicePropertyLatency, &frames);
-    CHECK_CA_ERROR("cannot get device latency");
-
     uint64_t audiounit_latency_us = audiounit_latency_sec * 1e6;
-    uint64_t device_latency_us    = ca_frames_to_us(ao, frames);
+    uint64_t device_latency_us    = ca_get_device_latency_us(ao, p->device);
 
     MP_VERBOSE(ao, "audiounit latency [us]: %lld\n", audiounit_latency_us);
     MP_VERBOSE(ao, "device latency [us]: %lld\n", device_latency_us);
@@ -77,11 +73,14 @@ static OSStatus render_cb_lpcm(void *ctx, AudioUnitRenderActionFlags *aflags,
 {
     struct ao *ao   = ctx;
     struct priv *p  = ao->priv;
-    AudioBuffer buf = buffer_list->mBuffers[0];
+    void *planes[MP_NUM_CHANNELS] = {0};
+
+    for (int n = 0; n < ao->num_planes; n++)
+        planes[n] = buffer_list->mBuffers[n].mData;
 
     int64_t end = mp_time_us();
     end += p->hw_latency_us + ca_get_latency(ts) + ca_frames_to_us(ao, frames);
-    ao_read_data(ao, &buf.mData, frames, end);
+    ao_read_data(ao, planes, frames, end);
     return noErr;
 }
 
@@ -133,11 +132,6 @@ static bool reinit_device(struct ao *ao) {
     OSStatus err = ca_select_device(ao, ao->device, &p->device);
     CHECK_CA_ERROR("failed to select device");
 
-    char *uid;
-    err = CA_GET_STR(p->device, kAudioDevicePropertyDeviceUID, &uid);
-    CHECK_CA_ERROR("failed to get device UID");
-    ao->detected_device = talloc_steal(ao, uid);
-
     return true;
 
 coreaudio_error:
@@ -148,8 +142,8 @@ static int init(struct ao *ao)
 {
     struct priv *p = ao->priv;
 
-    if (AF_FORMAT_IS_IEC61937(ao->format)) {
-        MP_WARN(ao, "detected IEC61937, redirecting to coreaudio_exclusive\n");
+    if (!af_fmt_is_pcm(ao->format) || (ao->init_flags & AO_INIT_EXCLUSIVE)) {
+        MP_VERBOSE(ao, "redirecting to coreaudio_exclusive\n");
         ao->redirect = "coreaudio_exclusive";
         return CONTROL_ERROR;
     }
@@ -162,8 +156,6 @@ static int init(struct ao *ao)
 
     if (!ca_init_chmap(ao, p->device))
         goto coreaudio_error;
-
-    ao->format = af_fmt_from_planar(ao->format);
 
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
@@ -182,6 +174,8 @@ static void init_physical_format(struct ao *ao)
     struct priv *p = ao->priv;
     OSErr err;
 
+    void *tmp = talloc_new(NULL);
+
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
 
@@ -192,18 +186,31 @@ static void init_physical_format(struct ao *ao)
                        &streams, &n_streams);
     CHECK_CA_ERROR("could not get number of streams");
 
+    talloc_steal(tmp, streams);
+
+    MP_VERBOSE(ao, "Found %zd substream(s).\n", n_streams);
+
     for (int i = 0; i < n_streams; i++) {
         AudioStreamRangedDescription *formats;
         size_t n_formats;
 
-        err = CA_GET_ARY(streams[i],
-                            kAudioStreamPropertyAvailablePhysicalFormats,
-                            &formats, &n_formats);
+        MP_VERBOSE(ao, "Looking at formats in substream %d...\n", i);
+
+        err = CA_GET_ARY(streams[i], kAudioStreamPropertyAvailablePhysicalFormats,
+                         &formats, &n_formats);
 
         if (!CHECK_CA_WARN("could not get number of stream formats"))
             continue; // try next one
 
-        MP_VERBOSE(ao, "Looking at formats in substream %d...\n", i);
+        talloc_steal(tmp, formats);
+
+        uint32_t direction;
+        err = CA_GET(streams[i], kAudioStreamPropertyDirection, &direction);
+        CHECK_CA_ERROR("could not get stream direction");
+        if (direction != 0) {
+            MP_VERBOSE(ao, "Not an output stream.\n");
+            continue;
+        }
 
         AudioStreamBasicDescription best_asbd = {0};
 
@@ -224,12 +231,20 @@ static void init_physical_format(struct ao *ao)
                          &p->original_asbd);
             CHECK_CA_WARN("could not get current physical stream format");
 
-            ca_change_physical_format_sync(ao, streams[i], best_asbd);
+            if (ca_asbd_equals(&p->original_asbd, &best_asbd)) {
+                MP_VERBOSE(ao, "Requested format already set, not changing.\n");
+                p->original_asbd.mFormatID = 0;
+                break;
+            }
+
+            if (!ca_change_physical_format_sync(ao, streams[i], best_asbd))
+                p->original_asbd = (AudioStreamBasicDescription){0};
             break;
         }
     }
 
 coreaudio_error:
+    talloc_free(tmp);
     return;
 }
 
@@ -334,9 +349,12 @@ static void uninit(struct ao *ao)
 
 static OSStatus hotplug_cb(AudioObjectID id, UInt32 naddr,
                            const AudioObjectPropertyAddress addr[],
-                           void *ctx) {
-    reinit_device(ctx);
-    ao_hotplug_event(ctx);
+                           void *ctx)
+{
+    struct ao *ao = ctx;
+    MP_VERBOSE(ao, "Handling potential hotplug event...\n");
+    reinit_device(ao);
+    ao_hotplug_event(ao);
     return noErr;
 }
 
@@ -360,8 +378,8 @@ static int hotplug_init(struct ao *ao)
         err = AudioObjectAddPropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
         if (err != noErr) {
-            char *c1 = fourcc_repr(hotplug_properties[i]);
-            char *c2 = fourcc_repr(err);
+            char *c1 = mp_tag_str(hotplug_properties[i]);
+            char *c2 = mp_tag_str(err);
             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
             goto coreaudio_error;
         }
@@ -385,8 +403,8 @@ static void hotplug_uninit(struct ao *ao)
         err = AudioObjectRemovePropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
         if (err != noErr) {
-            char *c1 = fourcc_repr(hotplug_properties[i]);
-            char *c2 = fourcc_repr(err);
+            char *c1 = mp_tag_str(hotplug_properties[i]);
+            char *c2 = mp_tag_str(err);
             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
         }
     }
@@ -400,7 +418,7 @@ const struct ao_driver audio_out_coreaudio = {
     .uninit         = uninit,
     .init           = init,
     .control        = control,
-    .pause          = stop,
+    .reset          = stop,
     .resume         = start,
     .hotplug_init   = hotplug_init,
     .hotplug_uninit = hotplug_uninit,
@@ -410,4 +428,5 @@ const struct ao_driver audio_out_coreaudio = {
         OPT_FLAG("change-physical-format", change_physical_format, 0),
         {0}
     },
+    .options_prefix = "coreaudio",
 };

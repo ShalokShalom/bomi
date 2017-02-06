@@ -39,7 +39,7 @@
 #include "video/hwdec.h"
 #include "common/msg.h"
 #include "options/options.h"
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "vo.h"
 #include "x11_common.h"
 #include "video/csputils.h"
@@ -47,7 +47,6 @@
 #include "options/m_option.h"
 #include "video/mp_image.h"
 #include "osdep/timer.h"
-#include "bitmap_packer.h"
 
 // Returns x + a, but wrapped around to the range [0, m)
 // a must be within [-m, m], x within [0, m)
@@ -71,7 +70,6 @@ struct vdpctx {
     struct vdp_functions              *vdp;
     VdpDevice                          vdp_device;
     uint64_t                           preemption_counter;
-    struct mp_hwdec_info               hwdec_info;
 
     struct m_color                     colorkey;
 
@@ -81,8 +79,11 @@ struct vdpctx {
     VdpOutputSurface                   output_surfaces[MAX_OUTPUT_SURFACES];
     int                                num_output_surfaces;
     VdpOutputSurface                   black_pixel;
+    VdpOutputSurface                   rotation_surface;
 
     struct mp_image                   *current_image;
+    int64_t                            current_pts;
+    int                                current_duration;
 
     int                                output_surface_w, output_surface_h;
 
@@ -101,13 +102,14 @@ struct vdpctx {
     VdpRect                            src_rect_vid;
     VdpRect                            out_rect_vid;
     struct mp_osd_res                  osd_rect;
+    VdpBool                            supports_a8;
 
     int                                surface_num; // indexes output_surfaces
     int                                query_surface_num;
     VdpTime                            recent_vsync_time;
     float                              user_fps;
     int                                composite_detect;
-    unsigned int                       vsync_interval;
+    int                                vsync_interval;
     uint64_t                           last_queue_time;
     uint64_t                           queue_time[MAX_OUTPUT_SURFACES];
     uint64_t                           last_ideal_time;
@@ -122,9 +124,7 @@ struct vdpctx {
     struct osd_bitmap_surface {
         VdpRGBAFormat format;
         VdpBitmapSurface surface;
-        uint32_t max_width;
-        uint32_t max_height;
-        struct bitmap_packer *packer;
+        uint32_t surface_w, surface_h;
         // List of surfaces to be rendered
         struct osd_target {
             VdpRect source;
@@ -141,18 +141,17 @@ struct vdpctx {
 };
 
 static bool status_ok(struct vo *vo);
-static void draw_osd(struct vo *vo);
 
-static int render_video_to_output_surface(struct vo *vo,
-                                          VdpOutputSurface output_surface,
-                                          VdpRect *output_rect,
-                                          VdpRect *video_rect)
+static int video_to_output_surface(struct vo *vo, struct mp_image *mpi)
 {
     struct vdpctx *vc = vo->priv;
     struct vdp_functions *vdp = vc->vdp;
     VdpTime dummy;
     VdpStatus vdp_st;
-    struct mp_image *mpi = vc->current_image;
+
+    VdpOutputSurface output_surface = vc->output_surfaces[vc->surface_num];
+    VdpRect *output_rect = &vc->out_rect_vid;
+    VdpRect *video_rect = &vc->src_rect_vid;
 
     vdp_st = vdp->presentation_queue_block_until_surface_idle(vc->flip_queue,
                                                               output_surface,
@@ -163,7 +162,7 @@ static int render_video_to_output_surface(struct vo *vo,
     // Clear the borders between video and window (if there are any).
     // For some reason, video_mixer_render doesn't need it for YUV.
     // Also, if there is nothing to render, at least clear the screen.
-    if (vc->rgb_mode || !mpi) {
+    if (vc->rgb_mode || !mpi || mpi->params.rotate != 0) {
         int flags = VDP_OUTPUT_SURFACE_RENDER_ROTATE_0;
         vdp_st = vdp->output_surface_render_output_surface(output_surface,
                                                            NULL, vc->black_pixel,
@@ -188,20 +187,51 @@ static int render_video_to_output_surface(struct vo *vo,
     if (vc->hqscaling)
         opts.hqscaling = vc->hqscaling;
 
-    mp_vdpau_mixer_render(vc->video_mixer, &opts, output_surface, output_rect,
-                          mpi, video_rect);
+    if (mpi->params.rotate != 0) {
+        int flags;
+        VdpRect r_rect;
+        switch (mpi->params.rotate) {
+        case 90:
+            r_rect.y0 = output_rect->x0;
+            r_rect.y1 = output_rect->x1;
+            r_rect.x0 = output_rect->y0;
+            r_rect.x1 = output_rect->y1;
+            flags = VDP_OUTPUT_SURFACE_RENDER_ROTATE_90;
+            break;
+        case 180:
+            r_rect.x0 = output_rect->x0;
+            r_rect.x1 = output_rect->x1;
+            r_rect.y0 = output_rect->y0;
+            r_rect.y1 = output_rect->y1;
+            flags = VDP_OUTPUT_SURFACE_RENDER_ROTATE_180;
+            break;
+        case 270:
+            r_rect.y0 = output_rect->x0;
+            r_rect.y1 = output_rect->x1;
+            r_rect.x0 = output_rect->y0;
+            r_rect.x1 = output_rect->y1;
+            flags = VDP_OUTPUT_SURFACE_RENDER_ROTATE_270;
+            break;
+        default:
+            MP_ERR(vo, "Unsupported rotation angle: %u\n", mpi->params.rotate);
+            return -1;
+        }
+
+        mp_vdpau_mixer_render(vc->video_mixer, &opts, vc->rotation_surface,
+                              &r_rect, mpi, video_rect);
+        vdp_st = vdp->output_surface_render_output_surface(output_surface,
+                                                           output_rect,
+                                                           vc->rotation_surface,
+                                                           &r_rect,
+                                                           NULL,
+                                                           NULL,
+                                                           flags);
+        CHECK_VDP_WARNING(vo, "Error rendering rotated frame");
+    } else {
+        mp_vdpau_mixer_render(vc->video_mixer, &opts, output_surface,
+                              output_rect, mpi, video_rect);
+    }
     return 0;
-}
-
-static int video_to_output_surface(struct vo *vo)
-{
-    struct vdpctx *vc = vo->priv;
-
-    int r = render_video_to_output_surface(vo,
-                                           vc->output_surfaces[vc->surface_num],
-                                           &vc->out_rect_vid, &vc->src_rect_vid);
-    draw_osd(vo);
-    return r;
 }
 
 static void forget_frames(struct vo *vo, bool seek_reset)
@@ -233,10 +263,17 @@ static void resize(struct vo *vo)
     vc->out_rect_vid.x1 = dst_rect.x1;
     vc->out_rect_vid.y0 = dst_rect.y0;
     vc->out_rect_vid.y1 = dst_rect.y1;
-    vc->src_rect_vid.x0 = src_rect.x0;
-    vc->src_rect_vid.x1 = src_rect.x1;
-    vc->src_rect_vid.y0 = src_rect.y0;
-    vc->src_rect_vid.y1 = src_rect.y1;
+    if (vo->params->rotate == 90 || vo->params->rotate == 270) {
+        vc->src_rect_vid.y0 = src_rect.x0;
+        vc->src_rect_vid.y1 = src_rect.x1;
+        vc->src_rect_vid.x0 = src_rect.y0;
+        vc->src_rect_vid.x1 = src_rect.y1;
+    } else {
+        vc->src_rect_vid.x0 = src_rect.x0;
+        vc->src_rect_vid.x1 = src_rect.x1;
+        vc->src_rect_vid.y0 = src_rect.y0;
+        vc->src_rect_vid.y1 = src_rect.y1;
+    }
 
     VdpBool ok;
     uint32_t max_w, max_h;
@@ -249,7 +286,7 @@ static void resize(struct vo *vo)
     vc->flip_offset_us = vo->opts->fullscreen ?
                          1000LL * vc->flip_offset_fs :
                          1000LL * vc->flip_offset_window;
-    vo_set_flip_queue_params(vo, vc->flip_offset_us, false);
+    vo_set_queue_params(vo, vc->flip_offset_us, 1);
 
     if (vc->output_surface_w < vo->dwidth || vc->output_surface_h < vo->dheight) {
         vc->output_surface_w = s_size(max_w, vc->output_surface_w, vo->dwidth);
@@ -271,6 +308,27 @@ static void resize(struct vo *vo)
             MP_DBG(vo, "vdpau out create: %u\n",
                    vc->output_surfaces[i]);
         }
+        if (vc->rotation_surface != VDP_INVALID_HANDLE) {
+            vdp_st = vdp->output_surface_destroy(vc->rotation_surface);
+            CHECK_VDP_WARNING(vo, "Error when calling "
+                              "vdp_output_surface_destroy");
+        }
+        if (vo->params->rotate == 90 || vo->params->rotate == 270) {
+            vdp_st = vdp->output_surface_create(vc->vdp_device,
+                                                OUTPUT_RGBA_FORMAT,
+                                                vc->output_surface_h,
+                                                vc->output_surface_w,
+                                                &vc->rotation_surface);
+        } else if (vo->params->rotate == 180) {
+            vdp_st = vdp->output_surface_create(vc->vdp_device,
+                                                OUTPUT_RGBA_FORMAT,
+                                                vc->output_surface_w,
+                                                vc->output_surface_h,
+                                                &vc->rotation_surface);
+        }
+        CHECK_VDP_WARNING(vo, "Error when calling vdp_output_surface_create");
+        MP_DBG(vo, "vdpau rotation surface create: %u\n",
+               vc->rotation_surface);
     }
     vo->want_redraw = true;
 }
@@ -374,15 +432,14 @@ static void mark_vdpau_objects_uninitialized(struct vo *vo)
 
     forget_frames(vo, false);
     vc->black_pixel = VDP_INVALID_HANDLE;
-    vc->video_mixer->video_mixer = VDP_INVALID_HANDLE;
     vc->flip_queue = VDP_INVALID_HANDLE;
     vc->flip_target = VDP_INVALID_HANDLE;
     for (int i = 0; i < MAX_OUTPUT_SURFACES; i++)
         vc->output_surfaces[i] = VDP_INVALID_HANDLE;
+    vc->rotation_surface = VDP_INVALID_HANDLE;
     vc->vdp_device = VDP_INVALID_HANDLE;
     for (int i = 0; i < MAX_OSD_PARTS; i++) {
         struct osd_bitmap_surface *sfc = &vc->osd_surfaces[i];
-        talloc_free(sfc->packer);
         sfc->change_id = 0;
         *sfc = (struct osd_bitmap_surface){
             .surface = VDP_INVALID_HANDLE,
@@ -416,7 +473,7 @@ static bool status_ok(struct vo *vo)
  * connect to X server, create and map window, initialize all
  * VDPAU objects, create different surfaces etc.
  */
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     struct vdpctx *vc = vo->priv;
     struct vdp_functions *vdp = vc->vdp;
@@ -450,28 +507,12 @@ static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
 
     free_video_specific(vo);
 
-    vo_x11_config_vo_window(vo, NULL, flags, "vdpau");
+    vo_x11_config_vo_window(vo);
 
     if (initialize_vdpau_objects(vo) < 0)
         return -1;
 
     return 0;
-}
-
-static struct bitmap_packer *make_packer(struct vo *vo, VdpRGBAFormat format)
-{
-    struct vdpctx *vc = vo->priv;
-    struct vdp_functions *vdp = vc->vdp;
-
-    struct bitmap_packer *packer = talloc_zero(vo, struct bitmap_packer);
-    uint32_t w_max = 0, h_max = 0;
-    VdpStatus vdp_st = vdp->
-        bitmap_surface_query_capabilities(vc->vdp_device, format,
-                                          &(VdpBool){0}, &w_max, &h_max);
-    CHECK_VDP_WARNING(vo, "Query to get max OSD surface size failed");
-    packer->w_max = w_max;
-    packer->h_max = h_max;
-    return packer;
 }
 
 static void draw_osd_part(struct vo *vo, int index)
@@ -517,89 +558,99 @@ static void draw_osd_part(struct vo *vo, int index)
     }
 }
 
+static int next_pow2(int v)
+{
+    for (int x = 0; x < 30; x++) {
+        if ((1 << x) >= v)
+            return 1 << x;
+    }
+    return INT_MAX;
+}
+
 static void generate_osd_part(struct vo *vo, struct sub_bitmaps *imgs)
 {
     struct vdpctx *vc = vo->priv;
     struct vdp_functions *vdp = vc->vdp;
     VdpStatus vdp_st;
     struct osd_bitmap_surface *sfc = &vc->osd_surfaces[imgs->render_index];
-    bool need_upload = false;
 
     if (imgs->change_id == sfc->change_id)
         return; // Nothing changed and we still have the old data
 
+    sfc->change_id = imgs->change_id;
     sfc->render_count = 0;
 
     if (imgs->format == SUBBITMAP_EMPTY || imgs->num_parts == 0)
         return;
 
-    need_upload = true;
     VdpRGBAFormat format;
-    int format_size;
     switch (imgs->format) {
     case SUBBITMAP_LIBASS:
         format = VDP_RGBA_FORMAT_A8;
-        format_size = 1;
         break;
     case SUBBITMAP_RGBA:
         format = VDP_RGBA_FORMAT_B8G8R8A8;
-        format_size = 4;
         break;
     default:
         abort();
     };
-    if (sfc->format != format) {
-        talloc_free(sfc->packer);
-        sfc->packer = NULL;
-    };
-    sfc->format = format;
-    if (!sfc->packer)
-        sfc->packer = make_packer(vo, format);
-    sfc->packer->padding = imgs->scaled; // assume 2x2 filter on scaling
-    int r = packer_pack_from_subbitmaps(sfc->packer, imgs);
-    if (r < 0) {
-        MP_ERR(vo, "OSD bitmaps do not fit on a surface with the maximum "
-               "supported size\n");
-        return;
-    } else if (r == 1) {
+
+    assert(imgs->packed);
+
+    int r_w = next_pow2(imgs->packed_w);
+    int r_h = next_pow2(imgs->packed_h);
+
+    if (sfc->format != format || sfc->surface == VDP_INVALID_HANDLE ||
+        sfc->surface_w < r_w || sfc->surface_h < r_h)
+    {
+        MP_VERBOSE(vo, "Allocating a %dx%d surface for OSD bitmaps.\n", r_w, r_h);
+
+        uint32_t m_w = 0, m_h = 0;
+        vdp_st = vdp->bitmap_surface_query_capabilities(vc->vdp_device, format,
+                                                        &(VdpBool){0}, &m_w, &m_h);
+        CHECK_VDP_WARNING(vo, "Query to get max OSD surface size failed");
+
+        if (r_w > m_w || r_h > m_h) {
+            MP_ERR(vo, "OSD bitmaps do not fit on a surface with the maximum "
+                   "supported size\n");
+            return;
+        }
+
         if (sfc->surface != VDP_INVALID_HANDLE) {
             vdp_st = vdp->bitmap_surface_destroy(sfc->surface);
             CHECK_VDP_WARNING(vo, "Error when calling vdp_bitmap_surface_destroy");
         }
-        MP_VERBOSE(vo, "Allocating a %dx%d surface for OSD bitmaps.\n",
-                   sfc->packer->w, sfc->packer->h);
+
+        VdpBitmapSurface surface;
         vdp_st = vdp->bitmap_surface_create(vc->vdp_device, format,
-                                            sfc->packer->w, sfc->packer->h,
-                                            true, &sfc->surface);
-        if (vdp_st != VDP_STATUS_OK)
-            sfc->surface = VDP_INVALID_HANDLE;
+                                            r_w, r_h, true, &surface);
         CHECK_VDP_WARNING(vo, "OSD: error when creating surface");
-    }
-    if (imgs->scaled) {
-        char zeros[sfc->packer->used_width * format_size];
-        memset(zeros, 0, sizeof(zeros));
-        vdp_st = vdp->bitmap_surface_put_bits_native(sfc->surface,
-                &(const void *){zeros}, &(uint32_t){0},
-                &(VdpRect){0, 0, sfc->packer->used_width,
-                                 sfc->packer->used_height});
-        CHECK_VDP_WARNING(vo, "OSD: error uploading OSD bitmap");
+        if (vdp_st != VDP_STATUS_OK)
+            return;
+
+        sfc->surface = surface;
+        sfc->surface_w = r_w;
+        sfc->surface_h = r_h;
+        sfc->format = format;
     }
 
-    if (sfc->surface == VDP_INVALID_HANDLE)
-        return;
-    if (sfc->packer->count > sfc->targets_size) {
-        talloc_free(sfc->targets);
-        sfc->targets_size = sfc->packer->count;
-        sfc->targets = talloc_size(vc, sfc->targets_size
-                                       * sizeof(*sfc->targets));
-    }
+    void *data = imgs->packed->planes[0];
+    int stride = imgs->packed->stride[0];
+    VdpRect rc = {0, 0, imgs->packed_w, imgs->packed_h};
+    vdp_st = vdp->bitmap_surface_put_bits_native(sfc->surface,
+                                                 &(const void *){data},
+                                                 &(uint32_t){stride},
+                                                 &rc);
+    CHECK_VDP_WARNING(vo, "OSD: putbits failed");
 
-    for (int i = 0 ;i < sfc->packer->count; i++) {
+    MP_TARRAY_GROW(vc, sfc->targets, imgs->num_parts);
+    sfc->render_count = imgs->num_parts;
+
+    for (int i = 0; i < imgs->num_parts; i++) {
         struct sub_bitmap *b = &imgs->parts[i];
-        struct osd_target *target = sfc->targets + sfc->render_count;
-        int x = sfc->packer->result[i].x;
-        int y = sfc->packer->result[i].y;
-        target->source = (VdpRect){x, y, x + b->w, y + b->h};
+        struct osd_target *target = &sfc->targets[i];
+        target->source = (VdpRect){b->src_x, b->src_y,
+                                   b->src_x + b->w, b->src_y + b->h};
         target->dest = (VdpRect){b->x, b->y, b->x + b->dw, b->y + b->dh};
         target->color = (VdpColor){1, 1, 1, 1};
         if (imgs->format == SUBBITMAP_LIBASS) {
@@ -609,18 +660,7 @@ static void generate_osd_part(struct vo *vo, struct sub_bitmaps *imgs)
             target->color.green = ((color >> 16) & 0xff) / 255.0;
             target->color.red   = ((color >> 24) & 0xff) / 255.0;
         }
-        if (need_upload) {
-            vdp_st = vdp->
-                bitmap_surface_put_bits_native(sfc->surface,
-                                               &(const void *){b->bitmap},
-                                               &(uint32_t){b->stride},
-                                               &target->source);
-                CHECK_VDP_WARNING(vo, "OSD: putbits failed");
-        }
-        sfc->render_count++;
     }
-
-    sfc->change_id = imgs->change_id;
 }
 
 static void draw_osd_cb(void *ctx, struct sub_bitmaps *imgs)
@@ -637,8 +677,8 @@ static void draw_osd(struct vo *vo)
     if (!status_ok(vo))
         return;
 
-    static const bool formats[SUBBITMAP_COUNT] = {
-        [SUBBITMAP_LIBASS] = true,
+    bool formats[SUBBITMAP_COUNT] = {
+        [SUBBITMAP_LIBASS] = vc->supports_a8,
         [SUBBITMAP_RGBA] = true,
     };
 
@@ -701,16 +741,19 @@ static inline uint64_t prev_vsync(struct vdpctx *vc, uint64_t ts)
     return ts - offset;
 }
 
-static int flip_page_timed(struct vo *vo, int64_t pts_us, int duration)
+static void flip_page(struct vo *vo)
 {
     struct vdpctx *vc = vo->priv;
     struct vdp_functions *vdp = vc->vdp;
     VdpStatus vdp_st;
 
+    int64_t pts_us = vc->current_pts;
+    int duration = vc->current_duration;
+
     vc->dropped_frame = true; // changed at end if false
 
     if (!check_preemption(vo))
-        return 0;
+        goto drop;
 
     vc->vsync_interval = 1;
     if (vc->user_fps > 0) {
@@ -718,6 +761,7 @@ static int flip_page_timed(struct vo *vo, int64_t pts_us, int duration)
     } else if (vc->user_fps == 0) {
         vc->vsync_interval = vo_get_vsync_interval(vo) * 1000;
     }
+    vc->vsync_interval = MPMAX(vc->vsync_interval, 1);
 
     if (duration > INT_MAX / 1000)
         duration = -1;
@@ -795,7 +839,7 @@ static int flip_page_timed(struct vo *vo, int64_t pts_us, int duration)
     pts = FFMAX(pts, vc->last_queue_time + vc->vsync_interval);
     pts = FFMAX(pts, now);
     if (npts < PREV_VSYNC(pts) + vc->vsync_interval)
-        return 0;
+        goto drop;
 
     int num_flips = update_presentation_queue_status(vo);
     vsync = vc->recent_vsync_time + num_flips * vc->vsync_interval;
@@ -803,7 +847,7 @@ static int flip_page_timed(struct vo *vo, int64_t pts_us, int duration)
     pts = FFMAX(pts, vsync + (vc->vsync_interval >> 2));
     vsync = PREV_VSYNC(pts);
     if (npts < vsync + vc->vsync_interval)
-        return 0;
+        goto drop;
     pts = vsync + (vc->vsync_interval >> 2);
     VdpOutputSurface frame = vc->output_surfaces[vc->surface_num];
     vdp_st = vdp->presentation_queue_display(vc->flip_queue, frame,
@@ -818,25 +862,35 @@ static int flip_page_timed(struct vo *vo, int64_t pts_us, int duration)
     vc->last_ideal_time = ideal_pts;
     vc->dropped_frame = false;
     vc->surface_num = WRAP_ADD(vc->surface_num, 1, vc->num_output_surfaces);
-    return 1;
+    return;
+
+drop:
+    vo_increment_drop_count(vo, 1);
 }
 
-static void draw_image(struct vo *vo, struct mp_image *mpi)
+static void draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct vdpctx *vc = vo->priv;
 
     check_preemption(vo);
 
-    struct mp_image *vdp_mpi = mp_vdpau_upload_video_surface(vc->mpvdp, mpi);
-    if (!vdp_mpi)
-        MP_ERR(vo, "Could not upload image.\n");
-    talloc_free(mpi);
+    if (frame->current && !frame->redraw) {
+        struct mp_image *vdp_mpi =
+            mp_vdpau_upload_video_surface(vc->mpvdp, frame->current);
+        if (!vdp_mpi)
+            MP_ERR(vo, "Could not upload image.\n");
 
-    talloc_free(vc->current_image);
-    vc->current_image = vdp_mpi;
+        talloc_free(vc->current_image);
+        vc->current_image = vdp_mpi;
+    }
 
-    if (status_ok(vo))
-        video_to_output_surface(vo);
+    vc->current_pts = frame->pts;
+    vc->current_duration = frame->duration;
+
+    if (status_ok(vo)) {
+        video_to_output_surface(vo, vc->current_image);
+        draw_osd(vo);
+    }
 }
 
 // warning: the size and pixel format of surface must match that of the
@@ -861,10 +915,6 @@ static struct mp_image *read_output_surface(struct vo *vo,
     struct mp_image *image = mp_image_alloc(IMGFMT_BGR0, w, h);
     if (!image)
         return NULL;
-
-    image->params.colorspace = MP_CSP_RGB;
-    // hardcoded with conv. matrix
-    image->params.colorlevels = vo->params->outputlevels;
 
     void *dst_planes[] = { image->planes[0] };
     uint32_t dst_pitches[] = { image->stride[0] };
@@ -923,6 +973,10 @@ static void destroy_vdpau_objects(struct vo *vo)
         vdp_st = vdp->output_surface_destroy(vc->output_surfaces[i]);
         CHECK_VDP_WARNING(vo, "Error when calling vdp_output_surface_destroy");
     }
+    if (vc->rotation_surface != VDP_INVALID_HANDLE) {
+        vdp_st = vdp->output_surface_destroy(vc->rotation_surface);
+        CHECK_VDP_WARNING(vo, "Error when calling vdp_output_surface_destroy");
+    }
 
     for (int i = 0; i < MAX_OSD_PARTS; i++) {
         struct osd_bitmap_surface *sfc = &vc->osd_surfaces[i];
@@ -940,6 +994,9 @@ static void uninit(struct vo *vo)
 {
     struct vdpctx *vc = vo->priv;
 
+    hwdec_devices_remove(vo->hwdec_devs, &vc->mpvdp->hwctx);
+    hwdec_devices_destroy(vo->hwdec_devs);
+
     /* Destroy all vdpau objects */
     mp_vdpau_mixer_destroy(vc->video_mixer);
     destroy_vdpau_objects(vo);
@@ -954,13 +1011,19 @@ static int preinit(struct vo *vo)
     if (!vo_x11_init(vo))
         return -1;
 
-    vc->mpvdp = mp_vdpau_create_device_x11(vo->log, vo->x11->display);
+    if (!vo_x11_create_vo_window(vo, NULL, "vdpau")) {
+        vo_x11_uninit(vo);
+        return -1;
+    }
+
+    vc->mpvdp = mp_vdpau_create_device_x11(vo->log, vo->x11->display, false);
     if (!vc->mpvdp) {
         vo_x11_uninit(vo);
         return -1;
     }
 
-    vc->hwdec_info.hwctx = &vc->mpvdp->hwctx;
+    vo->hwdec_devs = hwdec_devices_create();
+    hwdec_devices_add(vo->hwdec_devs, &vc->mpvdp->hwctx);
 
     vc->video_mixer = mp_vdpau_mixer_create(vc->mpvdp, vo->log);
 
@@ -977,6 +1040,9 @@ static int preinit(struct vo *vo)
 
     vc->vdp_device = vc->mpvdp->vdp_device;
     vc->vdp = &vc->mpvdp->vdp;
+
+    vc->vdp->bitmap_surface_query_capabilities(vc->vdp_device, VDP_RGBA_FORMAT_A8,
+                            &vc->supports_a8, &(uint32_t){0}, &(uint32_t){0});
 
     vc->video_eq.capabilities = MP_CSP_EQ_CAPS_COLORMATRIX;
 
@@ -1021,13 +1087,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
     check_preemption(vo);
 
     switch (request) {
-    case VOCTRL_GET_HWDEC_INFO: {
-        struct mp_hwdec_info **arg = data;
-        *arg = &vc->hwdec_info;
-        return true;
-    }
-    case VOCTRL_GET_PANSCAN:
-        return VO_TRUE;
     case VOCTRL_SET_PANSCAN:
         checked_resize(vo);
         return VO_TRUE;
@@ -1040,10 +1099,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
         struct voctrl_get_equalizer_args *args = data;
         return get_equalizer(vo, args->name, args->valueptr);
     }
-    case VOCTRL_REDRAW_FRAME:
-        if (status_ok(vo))
-            video_to_output_surface(vo);
-        return true;
     case VOCTRL_RESET:
         forget_frames(vo, true);
         return true;
@@ -1075,13 +1130,15 @@ static int control(struct vo *vo, uint32_t request, void *data)
 const struct vo_driver video_out_vdpau = {
     .description = "VDPAU with X11",
     .name = "vdpau",
-    .caps = VO_CAP_FRAMEDROP,
+    .caps = VO_CAP_FRAMEDROP | VO_CAP_ROTATE90,
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_image = draw_image,
-    .flip_page_timed = flip_page_timed,
+    .draw_frame = draw_frame,
+    .flip_page = flip_page,
+    .wakeup = vo_x11_wakeup,
+    .wait_events = vo_x11_wait_events,
     .uninit = uninit,
     .priv_size = sizeof(struct vdpctx),
     .options = (const struct m_option []){
@@ -1093,15 +1150,19 @@ const struct vo_driver video_out_vdpau = {
         OPT_INTRANGE("hqscaling", hqscaling, 0, 0, 9),
         OPT_FLOAT("fps", user_fps, 0),
         OPT_FLAG("composite-detect", composite_detect, 0, OPTDEF_INT(1)),
-        OPT_INT("queuetime_windowed", flip_offset_window, 0, OPTDEF_INT(50)),
-        OPT_INT("queuetime_fs", flip_offset_fs, 0, OPTDEF_INT(50)),
-        OPT_INTRANGE("output_surfaces", num_output_surfaces, 0,
+        OPT_INT("queuetime-windowed", flip_offset_window, 0, OPTDEF_INT(50)),
+        OPT_INT("queuetime-fs", flip_offset_fs, 0, OPTDEF_INT(50)),
+        OPT_INTRANGE("output-surfaces", num_output_surfaces, 0,
                      2, MAX_OUTPUT_SURFACES, OPTDEF_INT(3)),
         OPT_COLOR("colorkey", colorkey, 0,
                   .defval = &(const struct m_color) {
                       .r = 2, .g = 5, .b = 7, .a = 255,
                   }),
         OPT_FLAG("force-yuv", force_yuv, 0),
+        OPT_REPLACED("queuetime_windowed", "queuetime-windowed"),
+        OPT_REPLACED("queuetime_fs", "queuetime-fs"),
+        OPT_REPLACED("output_surfaces", "output-surfaces"),
         {NULL},
-    }
+    },
+    .options_prefix = "vo-vdpau",
 };

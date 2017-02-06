@@ -42,7 +42,7 @@
 #include <X11/extensions/Xvlib.h>
 
 #include "options/options.h"
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "common/msg.h"
 #include "vo.h"
 #include "video/mp_image.h"
@@ -90,6 +90,8 @@ struct xvctx {
     struct mp_rect src_rect;
     struct mp_rect dst_rect;
     uint32_t max_width, max_height; // zero means: not set
+    GC f_gc;    // used to paint background
+    GC vo_gc;   // used to paint video
     int Shmem_Flag;
 #if HAVE_SHM && HAVE_XEXT
     XShmSegmentInfo Shminfo[MAX_BUFFERS];
@@ -315,7 +317,7 @@ static int xv_init_colorkey(struct vo *vo)
 
     /* check if colorkeying is needed */
     xv_atom = xv_intern_atom_if_exists(vo, "XV_COLORKEY");
-    if (xv_atom != None && !(ctx->colorkey & 0xFF000000)) {
+    if (xv_atom != None && ctx->xv_ck_info.method != CK_METHOD_NONE) {
         if (ctx->xv_ck_info.source == CK_SRC_CUR) {
             int colorkey_ret;
 
@@ -360,8 +362,10 @@ static int xv_init_colorkey(struct vo *vo)
             if (xv_atom != None)
                 XvSetPortAttribute(display, ctx->xv_port, xv_atom, 0);
         }
-    } else // do no colorkey drawing at all
+    } else { // do no colorkey drawing at all
         ctx->xv_ck_info.method = CK_METHOD_NONE;
+        ctx->colorkey = 0xFF000000;
+    }
 
     xv_print_ck_info(vo);
 
@@ -381,11 +385,11 @@ static void xv_draw_colorkey(struct vo *vo, const struct mp_rect *rc)
     if (ctx->xv_ck_info.method == CK_METHOD_MANUALFILL ||
         ctx->xv_ck_info.method == CK_METHOD_BACKGROUND)
     {
-        if (!x11->vo_gc)
+        if (!ctx->vo_gc)
             return;
         //less tearing than XClearWindow()
-        XSetForeground(x11->display, x11->vo_gc, ctx->xv_colorkey);
-        XFillRectangle(x11->display, x11->window, x11->vo_gc, rc->x0, rc->y0,
+        XSetForeground(x11->display, ctx->vo_gc, ctx->xv_colorkey);
+        XFillRectangle(x11->display, x11->window, ctx->vo_gc, rc->x0, rc->y0,
                        rc->x1 - rc->x0, rc->y1 - rc->y0);
     }
 }
@@ -397,6 +401,38 @@ static void read_xv_csp(struct vo *vo)
     int bt709_enabled;
     if (xv_get_eq(vo, ctx->xv_port, "bt_709", &bt709_enabled))
         ctx->cached_csp = bt709_enabled == 100 ? MP_CSP_BT_709 : MP_CSP_BT_601;
+}
+
+
+static void fill_rect(struct vo *vo, GC gc, int x0, int y0, int x1, int y1)
+{
+    struct vo_x11_state *x11 = vo->x11;
+
+    x0 = MPMAX(x0, 0);
+    y0 = MPMAX(y0, 0);
+    x1 = MPMIN(x1, vo->dwidth);
+    y1 = MPMIN(y1, vo->dheight);
+
+    if (x11->window && gc && x1 > x0 && y1 > y0)
+        XFillRectangle(x11->display, x11->window, gc, x0, y0, x1 - x0, y1 - y0);
+}
+
+// Clear everything outside of rc with the background color
+static void vo_x11_clear_background(struct vo *vo, const struct mp_rect *rc)
+{
+    struct vo_x11_state *x11 = vo->x11;
+    struct xvctx *ctx = vo->priv;
+    GC gc = ctx->f_gc;
+
+    int w = vo->dwidth;
+    int h = vo->dheight;
+
+    fill_rect(vo, gc, 0,      0,      w,      rc->y0); // top
+    fill_rect(vo, gc, 0,      rc->y1, w,      h);      // bottom
+    fill_rect(vo, gc, 0,      rc->y0, rc->x0, rc->y1); // left
+    fill_rect(vo, gc, rc->x1, rc->y0, w,      rc->y1); // right
+
+    XFlush(x11->display);
 }
 
 static void resize(struct vo *vo)
@@ -422,7 +458,7 @@ static void resize(struct vo *vo)
  * create and map window,
  * allocate colors and (shared) memory
  */
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     struct vo_x11_state *x11 = vo->x11;
     struct xvctx *ctx = vo->priv;
@@ -455,7 +491,13 @@ static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
     if (!ctx->xv_format)
         return -1;
 
-    vo_x11_config_vo_window(vo, NULL, flags, "xv");
+    vo_x11_config_vo_window(vo);
+
+    if (!ctx->f_gc && !ctx->vo_gc) {
+        ctx->f_gc = XCreateGC(x11->display, x11->window, 0, 0);
+        ctx->vo_gc = XCreateGC(x11->display, x11->window, 0, NULL);
+        XSetForeground(x11->display, ctx->f_gc, 0);
+    }
 
     if (ctx->xv_ck_info.method == CK_METHOD_BACKGROUND)
         XSetWindowBackground(x11->display, x11->window, ctx->xv_colorkey);
@@ -478,7 +520,7 @@ static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
     ctx->current_buf = 0;
     ctx->current_ip_buf = 0;
 
-    int is_709 = params->colorspace == MP_CSP_BT_709;
+    int is_709 = params->color.space == MP_CSP_BT_709;
     xv_set_eq(vo, ctx->xv_port, "bt_709", is_709 * 200 - 100);
     read_xv_csp(vo);
 
@@ -493,6 +535,8 @@ static bool allocate_xvimage(struct vo *vo, int foo)
     struct vo_x11_state *x11 = vo->x11;
     // align it for faster OSD rendering (draw_bmp.c swscale usage)
     int aligned_w = FFALIGN(ctx->image_width, 32);
+    // round up the height to next chroma boundary too
+    int aligned_h = FFALIGN(ctx->image_height, 2);
 #if HAVE_SHM && HAVE_XEXT
     if (x11->display_is_local && XShmQueryExtension(x11->display)) {
         ctx->Shmem_Flag = 1;
@@ -506,7 +550,7 @@ static bool allocate_xvimage(struct vo *vo, int foo)
         ctx->xvimage[foo] =
             (XvImage *) XvShmCreateImage(x11->display, ctx->xv_port,
                                          ctx->xv_format, NULL,
-                                         aligned_w, ctx->image_height,
+                                         aligned_w, aligned_h,
                                          &ctx->Shminfo[foo]);
         if (!ctx->xvimage[foo])
             return false;
@@ -529,7 +573,7 @@ static bool allocate_xvimage(struct vo *vo, int foo)
         ctx->xvimage[foo] =
             (XvImage *) XvCreateImage(x11->display, ctx->xv_port,
                                       ctx->xv_format, NULL, aligned_w,
-                                      ctx->image_height);
+                                      aligned_h);
         if (!ctx->xvimage[foo])
             return false;
         ctx->xvimage[foo]->data = av_malloc(ctx->xvimage[foo]->data_size);
@@ -537,8 +581,17 @@ static bool allocate_xvimage(struct vo *vo, int foo)
             return false;
         XSync(x11->display, False);
     }
+
+    if ((ctx->xvimage[foo]->width < aligned_w) ||
+        (ctx->xvimage[foo]->height < aligned_h)) {
+        MP_ERR(vo, "Got XvImage with too small size: %ux%u (expected %ux%u)\n",
+               ctx->xvimage[foo]->width, ctx->xvimage[foo]->height,
+               aligned_w, ctx->image_height);
+        return false;
+    }
+
     struct mp_image img = get_xv_buffer(vo, foo);
-    img.w = aligned_w;
+    mp_image_set_size(&img, aligned_w, aligned_h);
     mp_image_clear(&img, 0, 0, img.w, img.h);
     return true;
 }
@@ -577,7 +630,7 @@ static inline void put_xvimage(struct vo *vo, XvImage *xvi)
     int sw = src->x1 - src->x0, sh = src->y1 - src->y0;
 #if HAVE_SHM && HAVE_XEXT
     if (ctx->Shmem_Flag) {
-        XvShmPutImage(x11->display, ctx->xv_port, x11->window, x11->vo_gc, xvi,
+        XvShmPutImage(x11->display, ctx->xv_port, x11->window, ctx->vo_gc, xvi,
                       src->x0, src->y0, sw, sh,
                       dst->x0, dst->y0, dw, dh,
                       True);
@@ -585,7 +638,7 @@ static inline void put_xvimage(struct vo *vo, XvImage *xvi)
     } else
 #endif
     {
-        XvPutImage(x11->display, ctx->xv_port, x11->window, x11->vo_gc, xvi,
+        XvPutImage(x11->display, ctx->xv_port, x11->window, ctx->vo_gc, xvi,
                    src->x0, src->y0, sw, sh,
                    dst->x0, dst->y0, dw, dh);
     }
@@ -610,7 +663,7 @@ static struct mp_image get_xv_buffer(struct vo *vo, int buf_index)
     if (vo->params) {
         struct mp_image_params params = *vo->params;
         if (ctx->cached_csp)
-            params.colorspace = ctx->cached_csp;
+            params.color.space = ctx->cached_csp;
         mp_image_set_attributes(&img, &params);
     }
 
@@ -702,6 +755,10 @@ static void uninit(struct vo *vo)
     }
     for (i = 0; i < ctx->num_buffers; i++)
         deallocate_xvimage(vo, i);
+    if (ctx->f_gc != None)
+        XFreeGC(vo->x11->display, ctx->f_gc);
+    if (ctx->vo_gc != None)
+        XFreeGC(vo->x11->display, ctx->vo_gc);
     // uninit() shouldn't get called unless initialization went past vo_init()
     vo_x11_uninit(vo);
 }
@@ -716,6 +773,9 @@ static int preinit(struct vo *vo)
 
     if (!vo_x11_init(vo))
         return -1;
+
+    if (!vo_x11_create_vo_window(vo, NULL, "xv"))
+        goto error;
 
     struct vo_x11_state *x11 = vo->x11;
 
@@ -796,6 +856,9 @@ static int preinit(struct vo *vo)
     ctx->fo = XvListImageFormats(x11->display, ctx->xv_port,
                                  (int *) &ctx->formats);
 
+    MP_WARN(vo, "Warning: this legacy VO has bad quality and performance, "
+                "and will in particular result in blurry OSD and subtitles. "
+                "You should fix your graphics drivers, or not force the xv VO.\n");
     return 0;
 
   error:
@@ -807,8 +870,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
 {
     struct xvctx *ctx = vo->priv;
     switch (request) {
-    case VOCTRL_GET_PANSCAN:
-        return VO_TRUE;
     case VOCTRL_SET_PANSCAN:
         resize(vo);
         return VO_TRUE;
@@ -844,6 +905,8 @@ const struct vo_driver video_out_xv = {
     .control = control,
     .draw_image = draw_image,
     .flip_page = flip_page,
+    .wakeup = vo_x11_wakeup,
+    .wait_events = vo_x11_wait_events,
     .uninit = uninit,
     .priv_size = sizeof(struct xvctx),
     .priv_defaults = &(const struct xvctx) {
@@ -861,12 +924,14 @@ const struct vo_driver video_out_xv = {
                     {"set", CK_SRC_SET},
                     {"cur", CK_SRC_CUR})),
         OPT_CHOICE("ck-method", xv_ck_info.method, 0,
-                   ({"bg", CK_METHOD_BACKGROUND},
+                   ({"none", CK_METHOD_NONE},
+                    {"bg", CK_METHOD_BACKGROUND},
                     {"man", CK_METHOD_MANUALFILL},
                     {"auto", CK_METHOD_AUTOPAINT})),
         OPT_INT("colorkey", colorkey, 0),
-        OPT_FLAG_STORE("no-colorkey", colorkey, 0, 0x1000000),
         OPT_INTRANGE("buffers", cfg_buffers, 0, 1, MAX_BUFFERS),
+        OPT_REMOVED("no-colorkey", "use ck-method=none instead"),
         {0}
     },
+    .options_prefix = "xv",
 };

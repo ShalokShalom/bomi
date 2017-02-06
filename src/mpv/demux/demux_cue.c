@@ -3,18 +3,18 @@
  *
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -23,7 +23,7 @@
 #include <dirent.h>
 #include <inttypes.h>
 
-#include "talloc.h"
+#include "mpv_talloc.h"
 
 #include "misc/bstr.h"
 #include "common/msg.h"
@@ -38,7 +38,7 @@
 #define PROBE_SIZE 512
 
 struct priv {
-    bstr data;
+    struct cue_file *f;
 };
 
 static void add_source(struct timeline *tl, struct demuxer *d)
@@ -56,10 +56,7 @@ static bool try_open(struct timeline *tl, char *filename)
         || bstrcasecmp(bstr0(tl->demuxer->filename), bfilename) == 0)
         return false;
 
-    struct stream *s = stream_create(filename, STREAM_READ, tl->cancel, tl->global);
-    if (!s)
-        return false;
-    struct demuxer *d = demux_open(s, NULL, tl->global);
+    struct demuxer *d = demux_open_url(filename, NULL, tl->cancel, tl->global);
     // Since .bin files are raw PCM data with no headers, we have to explicitly
     // open them. Also, try to avoid to open files that are most likely not .bin
     // files, as that would only play noise. Checking the file extension is
@@ -69,25 +66,24 @@ static bool try_open(struct timeline *tl, char *filename)
     if (!d && bstr_case_endswith(bfilename, bstr0(".bin"))) {
         MP_WARN(tl, "CUE: Opening as BIN file!\n");
         struct demuxer_params p = {.force_format = "rawaudio"};
-        d = demux_open(s, &p, tl->global);
+        d = demux_open_url(filename, &p, tl->cancel, tl->global);
     }
     if (d) {
         add_source(tl, d);
         return true;
     }
     MP_ERR(tl, "Could not open source '%s'!\n", filename);
-    free_stream(s);
     return false;
 }
 
-static bool open_source(struct timeline *tl, struct bstr filename)
+static bool open_source(struct timeline *tl, char *filename)
 {
     void *ctx = talloc_new(NULL);
     bool res = false;
 
     struct bstr dirname = mp_dirname(tl->demuxer->filename);
 
-    struct bstr base_filename = bstr0(mp_basename(bstrdup0(ctx, filename)));
+    struct bstr base_filename = bstr0(mp_basename(filename));
     if (!base_filename.len) {
         MP_WARN(tl, "CUE: Invalid audio filename in .cue file!\n");
     } else {
@@ -154,15 +150,18 @@ static void build_timeline(struct timeline *tl)
 
     add_source(tl, tl->demuxer);
 
-    struct cue_file *f = mp_parse_cue(p->data);
-    if (!f) {
-        MP_ERR(tl, "CUE: error parsing input file!\n");
-        goto out;
-    }
-    talloc_steal(ctx, f);
+    struct cue_track *tracks = NULL;
+    size_t track_count = 0;
 
-    struct cue_track *tracks = f->tracks;
-    size_t track_count = f->num_tracks;
+    for (size_t n = 0; n < p->f->num_tracks; n++) {
+        struct cue_track *track = &p->f->tracks[n];
+        if (track->filename) {
+            MP_TARRAY_APPEND(ctx, tracks, track_count, *track);
+        } else {
+            MP_WARN(tl->demuxer, "No file specified for track entry %zd. "
+                    "It will be removed\n", n + 1);
+        }
+    }
 
     if (track_count == 0) {
         MP_ERR(tl, "CUE: no tracks found!\n");
@@ -173,21 +172,21 @@ static void build_timeline(struct timeline *tl)
     // CUE files usually use either separate files for every single track, or
     // only one file for all tracks.
 
-    struct bstr *files = 0;
+    char **files = 0;
     size_t file_count = 0;
 
     for (size_t n = 0; n < track_count; n++) {
         struct cue_track *track = &tracks[n];
         track->source = -1;
         for (size_t file = 0; file < file_count; file++) {
-            if (bstrcmp(files[file], track->filename) == 0) {
+            if (strcmp(files[file], track->filename) == 0) {
                 track->source = file;
                 break;
             }
         }
         if (track->source == -1) {
             file_count++;
-            files = talloc_realloc(ctx, files, struct bstr, file_count);
+            files = talloc_realloc(ctx, files, char *, file_count);
             files[file_count - 1] = track->filename;
             track->source = file_count - 1;
         }
@@ -228,8 +227,7 @@ static void build_timeline(struct timeline *tl)
         };
         chapters[i] = (struct demux_chapter) {
             .pts = timeline[i].start,
-            // might want to include other metadata here
-            .name = bstrdup0(chapters, tracks[i].title),
+            .metadata = mp_tags_dup(tl, tracks[i].tags),
         };
         starttime += duration;
     }
@@ -255,6 +253,9 @@ out:
 
 static int try_open_file(struct demuxer *demuxer, enum demux_check check)
 {
+    if (!demuxer->access_references)
+        return -1;
+
     struct stream *s = demuxer->stream;
     if (check >= DEMUX_CHECK_UNSAFE) {
         bstr d = stream_peek(s, PROBE_SIZE);
@@ -264,9 +265,18 @@ static int try_open_file(struct demuxer *demuxer, enum demux_check check)
     struct priv *p = talloc_zero(demuxer, struct priv);
     demuxer->priv = p;
     demuxer->fully_read = true;
-    p->data = stream_read_complete(s, demuxer, 1000000);
-    if (p->data.start == NULL)
+
+    bstr data = stream_read_complete(s, p, 1000000);
+    if (data.start == NULL)
         return -1;
+    p->f = mp_parse_cue(data);
+    talloc_steal(p, p->f);
+    if (!p->f) {
+        MP_ERR(demuxer, "error parsing input file!\n");
+        return -1;
+    }
+
+    mp_tags_merge(demuxer->metadata, p->f->tags);
     return 0;
 }
 

@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <spawn.h>
@@ -64,6 +64,8 @@ int mp_subprocess(char **args, struct mp_cancel *cancel, void *ctx,
     int p_stderr[2] = {-1, -1};
     int devnull = -1;
     pid_t pid = -1;
+    bool spawned = false;
+    bool killed_by_us = false;
 
     if (on_stdout && mp_make_cloexec_pipe(p_stdout) < 0)
         goto done;
@@ -89,6 +91,7 @@ int mp_subprocess(char **args, struct mp_cancel *cancel, void *ctx,
         pid = -1;
         goto done;
     }
+    spawned = true;
 
     close(p_stdout[1]);
     p_stdout[1] = -1;
@@ -124,6 +127,7 @@ int mp_subprocess(char **args, struct mp_cancel *cancel, void *ctx,
         }
         if (fds[2].revents) {
             kill(pid, SIGKILL);
+            killed_by_us = true;
             break;
         }
     }
@@ -143,12 +147,15 @@ done:
     close(p_stderr[1]);
     close(devnull);
 
-    if (WIFEXITED(status) && WEXITSTATUS(status) != 127) {
+    if (!spawned || (WIFEXITED(status) && WEXITSTATUS(status) == 127)) {
+        *error = "init";
+        status = -1;
+    } else if (WIFEXITED(status)) {
         *error = NULL;
         status = WEXITSTATUS(status);
     } else {
-        *error = WEXITSTATUS(status) == 127 ? "init" : "killed";
-        status = -1;
+        *error = "killed";
+        status = killed_by_us ? MP_SUBPROCESS_EKILLED_BY_US : -1;
     }
 
     return status;

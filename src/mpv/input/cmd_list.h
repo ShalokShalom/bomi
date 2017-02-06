@@ -79,8 +79,7 @@ enum mp_command_type {
 
     MP_CMD_ENABLE_INPUT_SECTION,
     MP_CMD_DISABLE_INPUT_SECTION,
-
-    MP_CMD_DISCNAV,
+    MP_CMD_DEFINE_INPUT_SECTION,
 
     MP_CMD_AB_LOOP,
 
@@ -93,13 +92,12 @@ enum mp_command_type {
 
     /// Audio Filter commands
     MP_CMD_AF,
+    MP_CMD_AF_COMMAND,
     MP_CMD_AO_RELOAD,
 
     /// Video filter commands
     MP_CMD_VF,
-
-    /// Video output commands
-    MP_CMD_VO_CMDLINE,
+    MP_CMD_VF_COMMAND,
 
     /// Internal for Lua scripts
     MP_CMD_SCRIPT_BINDING,
@@ -115,6 +113,10 @@ enum mp_command_type {
     MP_CMD_HOOK_ACK,
 
     MP_CMD_RESCAN_EXTERNAL_FILES,
+
+    MP_CMD_APPLY_PROFILE,
+
+    MP_CMD_LOAD_SCRIPT,
 
     // Internal
     MP_CMD_COMMAND_LIST, // list of sub-commands in args[0].v.p

@@ -26,7 +26,7 @@
 #include <libavutil/common.h>
 #include <libavutil/intreadwrite.h>
 
-#include "talloc.h"
+#include "mpv_talloc.h"
 
 #include "config.h"
 #include "common/av_common.h"
@@ -42,8 +42,10 @@ struct priv {
     AVFrame *avframe;
     struct mp_audio frame;
     bool force_channel_map;
-    struct demux_packet *packet;
-    uint32_t skip_samples;
+    uint32_t skip_samples, trim_samples;
+    bool preroll_done;
+    double next_pts;
+    AVRational codec_timebase;
 };
 
 static void uninit(struct dec_audio *da);
@@ -60,7 +62,7 @@ const struct m_sub_options ad_lavc_conf = {
     .opts = (const m_option_t[]) {
         OPT_FLOATRANGE("ac3drc", ac3drc, 0, 0, 6),
         OPT_FLAG("downmix", downmix, 0),
-        OPT_INTRANGE("threads", threads, 0, 1, 16),
+        OPT_INTRANGE("threads", threads, 0, 0, 16),
         OPT_KEYVALUELIST("o", avopts, 0),
         {0}
     },
@@ -78,13 +80,14 @@ static int init(struct dec_audio *da, const char *decoder)
     struct ad_lavc_params *opts = mpopts->ad_lavc_params;
     AVCodecContext *lavc_context;
     AVCodec *lavc_codec;
-    struct sh_stream *sh = da->header;
-    struct sh_audio *sh_audio = sh->audio;
+    struct mp_codec_params *c = da->codec;
 
     struct priv *ctx = talloc_zero(NULL, struct priv);
     da->priv = ctx;
 
-    ctx->force_channel_map = sh_audio->force_channels;
+    ctx->codec_timebase = mp_get_codec_timebase(da->codec);
+
+    ctx->force_channel_map = c->force_channels;
 
     lavc_codec = avcodec_find_decoder_by_name(decoder);
     if (!lavc_codec) {
@@ -96,44 +99,34 @@ static int init(struct dec_audio *da, const char *decoder)
     lavc_context = avcodec_alloc_context3(lavc_codec);
     ctx->avctx = lavc_context;
     ctx->avframe = av_frame_alloc();
-    lavc_context->refcounted_frames = 1;
     lavc_context->codec_type = AVMEDIA_TYPE_AUDIO;
     lavc_context->codec_id = lavc_codec->id;
 
-    if (opts->downmix) {
+#if LIBAVCODEC_VERSION_MICRO >= 100
+    lavc_context->pkt_timebase = ctx->codec_timebase;
+#endif
+
+    if (opts->downmix && mpopts->audio_output_channels.num_chmaps == 1) {
         lavc_context->request_channel_layout =
-            mp_chmap_to_lavc(&mpopts->audio_output_channels);
+            mp_chmap_to_lavc(&mpopts->audio_output_channels.chmaps[0]);
     }
 
     // Always try to set - option only exists for AC3 at the moment
     av_opt_set_double(lavc_context, "drc_scale", opts->ac3drc,
                       AV_OPT_SEARCH_CHILDREN);
 
-#if HAVE_AVFRAME_SKIP_SAMPLES
+#if LIBAVCODEC_VERSION_MICRO >= 100
     // Let decoder add AV_FRAME_DATA_SKIP_SAMPLES.
     av_opt_set(lavc_context, "flags2", "+skip_manual", AV_OPT_SEARCH_CHILDREN);
 #endif
 
     mp_set_avopts(da->log, lavc_context, opts->avopts);
 
-    lavc_context->codec_tag = sh->format;
-    lavc_context->sample_rate = sh_audio->samplerate;
-    lavc_context->bit_rate = sh_audio->bitrate;
-    lavc_context->block_align = sh_audio->block_align;
-    lavc_context->bits_per_coded_sample = sh_audio->bits_per_coded_sample;
-    lavc_context->channels = sh_audio->channels.num;
-    if (!mp_chmap_is_unknown(&sh_audio->channels))
-        lavc_context->channel_layout = mp_chmap_to_lavc(&sh_audio->channels);
-
-    // demux_mkv
-    if (sh_audio->codecdata_len && sh_audio->codecdata &&
-            !lavc_context->extradata) {
-        mp_lavc_set_extradata(lavc_context, sh_audio->codecdata,
-                              sh_audio->codecdata_len);
+    if (mp_set_avctx_codec_headers(lavc_context, c) < 0) {
+        MP_ERR(da, "Could not set decoder parameters.\n");
+        uninit(da);
+        return 0;
     }
-
-    if (sh->lav_headers)
-        mp_copy_lav_codec_headers(lavc_context, sh->lav_headers);
 
     mp_set_avcodec_threads(da->log, lavc_context, opts->threads);
 
@@ -143,6 +136,8 @@ static int init(struct dec_audio *da, const char *decoder)
         uninit(da);
         return 0;
     }
+
+    ctx->next_pts = MP_NOPTS_VALUE;
 
     return 1;
 }
@@ -169,109 +164,119 @@ static int control(struct dec_audio *da, int cmd, void *arg)
     switch (cmd) {
     case ADCTRL_RESET:
         avcodec_flush_buffers(ctx->avctx);
-        talloc_free(ctx->packet);
-        ctx->packet = NULL;
         ctx->skip_samples = 0;
+        ctx->trim_samples = 0;
+        ctx->preroll_done = false;
+        ctx->next_pts = MP_NOPTS_VALUE;
         return CONTROL_TRUE;
     }
     return CONTROL_UNKNOWN;
 }
 
-static int decode_packet(struct dec_audio *da, struct mp_audio **out)
+static bool send_packet(struct dec_audio *da, struct demux_packet *mpkt)
 {
     struct priv *priv = da->priv;
     AVCodecContext *avctx = priv->avctx;
 
-    struct demux_packet *mpkt = priv->packet;
-    if (!mpkt) {
-        if (demux_read_packet_async(da->header, &mpkt) == 0)
-            return AD_WAIT;
-    }
-
-    priv->packet = talloc_steal(priv, mpkt);
-
-    int in_len = mpkt ? mpkt->len : 0;
+    // If the decoder discards the timestamp for some reason, we use the
+    // interpolated PTS. Initialize it so that it works for the initial
+    // packet as well.
+    if (mpkt && priv->next_pts == MP_NOPTS_VALUE)
+        priv->next_pts = mpkt->pts;
 
     AVPacket pkt;
-    mp_set_av_packet(&pkt, mpkt, NULL);
+    mp_set_av_packet(&pkt, mpkt, &priv->codec_timebase);
 
-    // If we don't have a PTS yet, use the first packet PTS we can get.
-    if (da->pts == MP_NOPTS_VALUE && mpkt && mpkt->pts != MP_NOPTS_VALUE) {
-        da->pts = mpkt->pts;
-        da->pts_offset = 0;
-    }
+    int ret = avcodec_send_packet(avctx, mpkt ? &pkt : NULL);
 
-    int got_frame = 0;
-    av_frame_unref(priv->avframe);
-    int ret = avcodec_decode_audio4(avctx, priv->avframe, &got_frame, &pkt);
-    if (mpkt) {
-        // At least "shorten" decodes sub-frames, instead of the whole packet.
-        // At least "mpc8" can return 0 and wants the packet again next time.
-        if (ret >= 0) {
-            ret = FFMIN(ret, mpkt->len); // sanity check against decoder overreads
-            mpkt->buffer += ret;
-            mpkt->len    -= ret;
-            mpkt->pts = MP_NOPTS_VALUE; // don't reset PTS next time
-        }
-        if (mpkt->len == 0 || ret < 0) {
-            talloc_free(mpkt);
-            priv->packet = NULL;
-        }
-        // LATM may need many packets to find mux info
-        if (ret == AVERROR(EAGAIN))
-            return AD_OK;
-    }
-    if (ret < 0) {
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+        return false;
+
+    if (ret < 0)
         MP_ERR(da, "Error decoding audio.\n");
-        return AD_ERR;
-    }
-    if (!got_frame)
-        return mpkt ? AD_OK : AD_EOF;
+    return true;
+}
 
-    double out_pts = mp_pts_from_av(priv->avframe->pkt_pts, NULL);
-    if (out_pts != MP_NOPTS_VALUE) {
-        da->pts = out_pts;
-        da->pts_offset = 0;
+static bool receive_frame(struct dec_audio *da, struct mp_audio **out)
+{
+    struct priv *priv = da->priv;
+    AVCodecContext *avctx = priv->avctx;
+
+    int ret = avcodec_receive_frame(avctx, priv->avframe);
+
+    if (ret == AVERROR_EOF) {
+        // If flushing was initialized earlier and has ended now, make it start
+        // over in case we get new packets at some point in the future.
+        control(da, ADCTRL_RESET, NULL);
+        return false;
+    } else if (ret < 0 && ret != AVERROR(EAGAIN)) {
+        MP_ERR(da, "Error decoding audio.\n");
     }
+
+#if LIBAVCODEC_VERSION_MICRO >= 100
+    if (priv->avframe->flags & AV_FRAME_FLAG_DISCARD)
+        av_frame_unref(priv->avframe);
+#endif
+
+    if (!priv->avframe->buf[0])
+        return true;
+
+    double out_pts = mp_pts_from_av(priv->avframe->pts, &priv->codec_timebase);
 
     struct mp_audio *mpframe = mp_audio_from_avframe(priv->avframe);
     if (!mpframe)
-        return AD_ERR;
+        return true;
 
     struct mp_chmap lavc_chmap = mpframe->channels;
     if (lavc_chmap.num != avctx->channels)
         mp_chmap_from_channels(&lavc_chmap, avctx->channels);
     if (priv->force_channel_map) {
-        struct sh_audio *sh_audio = da->header->audio;
-        if (lavc_chmap.num == sh_audio->channels.num)
-            lavc_chmap = sh_audio->channels;
+        if (lavc_chmap.num == da->codec->channels.num)
+            lavc_chmap = da->codec->channels;
     }
     mp_audio_set_channels(mpframe, &lavc_chmap);
 
-#if HAVE_AVFRAME_SKIP_SAMPLES
+    mpframe->pts = out_pts;
+
+    if (mpframe->pts == MP_NOPTS_VALUE)
+        mpframe->pts = priv->next_pts;
+    if (mpframe->pts != MP_NOPTS_VALUE)
+        priv->next_pts = mpframe->pts + mpframe->samples / (double)mpframe->rate;
+
+#if LIBAVCODEC_VERSION_MICRO >= 100
     AVFrameSideData *sd =
         av_frame_get_side_data(priv->avframe, AV_FRAME_DATA_SKIP_SAMPLES);
     if (sd && sd->size >= 10) {
         char *d = sd->data;
         priv->skip_samples += AV_RL32(d + 0);
-        uint32_t pad = AV_RL32(d + 4);
-        uint32_t skip = MPMIN(priv->skip_samples, mpframe->samples);
-        if (skip) {
-            mp_audio_skip_samples(mpframe, skip);
-            da->pts_offset += skip;
-            priv->skip_samples -= skip;
-        }
-        if (pad <= mpframe->samples)
-            mpframe->samples -= pad;
+        priv->trim_samples += AV_RL32(d + 4);
     }
 #endif
+
+    if (!priv->preroll_done) {
+        // Skip only if this isn't already handled by AV_FRAME_DATA_SKIP_SAMPLES.
+        if (!priv->skip_samples)
+            priv->skip_samples = avctx->delay;
+        priv->preroll_done = true;
+    }
+
+    uint32_t skip = MPMIN(priv->skip_samples, mpframe->samples);
+    if (skip) {
+        mp_audio_skip_samples(mpframe, skip);
+        priv->skip_samples -= skip;
+    }
+    uint32_t trim = MPMIN(priv->trim_samples, mpframe->samples);
+    if (trim) {
+        mpframe->samples -= trim;
+        priv->trim_samples -= trim;
+    }
 
     *out = mpframe;
 
     av_frame_unref(priv->avframe);
 
-    MP_DBG(da, "Decoded %d -> %d samples\n", in_len, mpframe->samples);
-    return 0;
+    MP_DBG(da, "Decoded %d samples\n", mpframe->samples);
+    return true;
 }
 
 static void add_decoders(struct mp_decoder_list *list)
@@ -285,5 +290,6 @@ const struct ad_functions ad_lavc = {
     .init = init,
     .uninit = uninit,
     .control = control,
-    .decode_packet = decode_packet,
+    .send_packet = send_packet,
+    .receive_frame = receive_frame,
 };

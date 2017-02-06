@@ -25,7 +25,7 @@
 #include <libavutil/md5.h>
 
 #include "config.h"
-#include "talloc.h"
+#include "mpv_talloc.h"
 
 #include "osdep/io.h"
 
@@ -59,8 +59,6 @@ static void load_all_cfgfiles(struct MPContext *mpctx, char *section,
 void mp_parse_cfgfiles(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
-    if (!opts->load_config)
-        return;
 
     mp_mk_config_dir(mpctx->global, "");
 
@@ -94,7 +92,8 @@ static int try_load_config(struct MPContext *mpctx, const char *file, int flags)
 
 // Set options file-local, and don't set them if the user set them via the
 // command line.
-#define FILE_LOCAL_FLAGS (M_SETOPT_BACKUP | M_SETOPT_PRESERVE_CMDLINE)
+#define FILE_LOCAL_FLAGS \
+    (M_SETOPT_BACKUP | M_SETOPT_RUNTIME | M_SETOPT_PRESERVE_CMDLINE)
 
 static void mp_load_per_file_config(struct MPContext *mpctx)
 {
@@ -139,6 +138,8 @@ static void mp_auto_load_profile(struct MPContext *mpctx, char *category,
     m_profile_t *p = m_config_get_profile0(mpctx->mconfig, t);
     if (p) {
         MP_INFO(mpctx, "Auto-loading profile '%s'\n", t);
+        if (strcmp(category, "ao") == 0 || strcmp(category, "vo") == 0)
+            MP_WARN(mpctx, "'%s' auto profiles are deprecated.\n", category);
         m_config_set_profile(mpctx->mconfig, t, FILE_LOCAL_FLAGS);
     }
 }
@@ -154,8 +155,8 @@ void mp_load_auto_profiles(struct MPContext *mpctx)
 
     mp_load_per_file_config(mpctx);
 
-    if (opts->vo.video_driver_list)
-        mp_auto_load_profile(mpctx, "vo", bstr0(opts->vo.video_driver_list[0].name));
+    if (opts->vo->video_driver_list)
+        mp_auto_load_profile(mpctx, "vo", bstr0(opts->vo->video_driver_list[0].name));
     if (opts->audio_driver_list)
         mp_auto_load_profile(mpctx, "ao", bstr0(opts->audio_driver_list[0].name));
 }
@@ -180,8 +181,8 @@ static char *mp_get_playback_resume_config_filename(struct MPContext *mpctx,
             realpath = mp_path_join(tmp, cwd, fname);
         }
     }
-    if (bstr_startswith0(bfname, "dvd://") && opts->dvd_device)
-        realpath = talloc_asprintf(tmp, "%s - %s", realpath, opts->dvd_device);
+    if (bstr_startswith0(bfname, "dvd://") && opts->dvd_opts->device)
+        realpath = talloc_asprintf(tmp, "%s - %s", realpath, opts->dvd_opts->device);
     if ((bstr_startswith0(bfname, "br://") || bstr_startswith0(bfname, "bd://") ||
          bstr_startswith0(bfname, "bluray://")) && opts->bluray_device)
         realpath = talloc_asprintf(tmp, "%s - %s", realpath, opts->bluray_device);
@@ -190,6 +191,14 @@ static char *mp_get_playback_resume_config_filename(struct MPContext *mpctx,
     char *conf = talloc_strdup(tmp, "");
     for (int i = 0; i < 16; i++)
         conf = talloc_asprintf_append(conf, "%02X", md5[i]);
+
+    if (!mpctx->cached_watch_later_configdir) {
+        char *wl_dir = mpctx->opts->watch_later_directory;
+        if (wl_dir && wl_dir[0]) {
+            mpctx->cached_watch_later_configdir =
+                mp_get_user_path(mpctx, mpctx->global, wl_dir);
+        }
+    }
 
     if (!mpctx->cached_watch_later_configdir) {
         mpctx->cached_watch_later_configdir =
@@ -205,42 +214,41 @@ exit:
 }
 
 static const char *const backup_properties[] = {
-    "options/osd-level",
+    "osd-level",
     //"loop",
-    "options/speed",
+    "speed",
     "options/edition",
-    "options/pause",
-    "volume-restore-data",
-    "options/audio-delay",
+    "pause",
+    "volume",
+    "mute",
+    "audio-delay",
     //"balance",
-    "options/fullscreen",
-    "options/colormatrix",
-    "options/colormatrix-input-range",
-    "options/colormatrix-output-range",
-    "options/ontop",
-    "options/border",
-    "options/gamma",
-    "options/brightness",
-    "options/contrast",
-    "options/saturation",
-    "options/hue",
+    "fullscreen",
+    "ontop",
+    "border",
+    "gamma",
+    "brightness",
+    "contrast",
+    "saturation",
+    "hue",
     "options/deinterlace",
-    "options/vf",
-    "options/af",
-    "options/panscan",
+    "vf",
+    "af",
+    "panscan",
     "options/aid",
     "options/vid",
     "options/sid",
-    "options/sub-delay",
-    "options/sub-pos",
-    "options/sub-visibility",
-    "options/sub-scale",
-    "options/sub-use-margins",
-    "options/ass-force-margins",
-    "options/ass-vsfilter-aspect-compat",
-    "options/ass-style-override",
-    "options/ab-loop-a",
-    "options/ab-loop-b",
+    "sub-delay",
+    "sub-speed",
+    "sub-pos",
+    "sub-visibility",
+    "sub-scale",
+    "sub-use-margins",
+    "sub-ass-force-margins",
+    "sub-ass-vsfilter-aspect-compat",
+    "sub-ass-style-override",
+    "ab-loop-a",
+    "ab-loop-b",
     "options/video-aspect",
     0
 };
@@ -275,11 +283,35 @@ static bool needs_config_quoting(const char *s)
     return false;
 }
 
+static void write_filename(struct MPContext *mpctx, FILE *file, char *filename)
+{
+    if (mpctx->opts->write_filename_in_watch_later_config) {
+        char write_name[1024] = {0};
+        for (int n = 0; filename[n] && n < sizeof(write_name) - 1; n++)
+            write_name[n] = (unsigned char)filename[n] < 32 ? '_' : filename[n];
+        fprintf(file, "# %s\n", write_name);
+    }
+}
+
+static void write_redirect(struct MPContext *mpctx, char *path)
+{
+    char *conffile = mp_get_playback_resume_config_filename(mpctx, path);
+    if (conffile) {
+        FILE *file = fopen(conffile, "wb");
+        if (file) {
+            fprintf(file, "# redirect entry\n");
+            write_filename(mpctx, file, path);
+            fclose(file);
+        }
+        talloc_free(conffile);
+    }
+}
+
 void mp_write_watch_later_conf(struct MPContext *mpctx)
 {
-    char *filename = mpctx->filename;
+    struct playlist_entry *cur = mpctx->playing;
     char *conffile = NULL;
-    if (!filename)
+    if (!cur)
         goto exit;
 
     struct demuxer *demux = mpctx->demuxer;
@@ -288,28 +320,23 @@ void mp_write_watch_later_conf(struct MPContext *mpctx)
         goto exit;
     }
 
-    double pos = get_current_time(mpctx);
-    if (pos == MP_NOPTS_VALUE)
-        goto exit;
-
-    mp_mk_config_dir(mpctx->global, MP_WATCH_LATER_CONF);
-
-    conffile = mp_get_playback_resume_config_filename(mpctx, filename);
+    conffile = mp_get_playback_resume_config_filename(mpctx, cur->filename);
     if (!conffile)
         goto exit;
+
+    mp_mk_config_dir(mpctx->global, mpctx->cached_watch_later_configdir);
 
     MP_INFO(mpctx, "Saving state.\n");
 
     FILE *file = fopen(conffile, "wb");
     if (!file)
         goto exit;
-    if (mpctx->opts->write_filename_in_watch_later_config) {
-        char write_name[1024] = {0};
-        for (int n = 0; filename[n] && n < sizeof(write_name) - 1; n++)
-            write_name[n] = (unsigned char)filename[n] < 32 ? '_' : filename[n];
-        fprintf(file, "# %s\n", write_name);
-    }
-    fprintf(file, "start=%f\n", pos);
+
+    write_filename(mpctx, file, cur->filename);
+
+    double pos = get_current_time(mpctx);
+    if (pos != MP_NOPTS_VALUE)
+        fprintf(file, "start=%f\n", pos);
     for (int i = 0; backup_properties[i]; i++) {
         const char *pname = backup_properties[i];
         char *val = NULL;
@@ -331,6 +358,37 @@ void mp_write_watch_later_conf(struct MPContext *mpctx)
         talloc_free(val);
     }
     fclose(file);
+
+    // This allows us to recursively resume directories etc., whose entries are
+    // expanded the first time it's "played". For example, if "/a/b/c.mkv" is
+    // the current entry, then we want to resume this file if the user does
+    // "mpv /a". This would expand to the directory entries in "/a", and if
+    // "/a/a.mkv" is not the first entry, this would be played.
+    // Here, we write resume entries for "/a" and "/a/b".
+    // (Unfortunately, this will leave stray resume files on resume, because
+    // obviously it resumes only from one of those paths.)
+    for (int n = 0; n < cur->num_redirects; n++)
+        write_redirect(mpctx, cur->redirects[n]);
+    // And at last, for local directories, we write an entry for each path
+    // prefix, so the user can resume from an arbitrary directory. This starts
+    // with the first redirect (all other redirects are further prefixes).
+    if (cur->num_redirects) {
+        char *path = cur->redirects[0];
+        char tmp[4096];
+        if (!mp_is_url(bstr0(path)) && strlen(path) < sizeof(tmp)) {
+            snprintf(tmp, sizeof(tmp), "%s", path);
+            for (;;) {
+                bstr dir = mp_dirname(tmp);
+                if (dir.len == strlen(tmp) || !dir.len || bstr_equals0(dir, "."))
+                    break;
+
+                tmp[dir.len] = '\0';
+                if (strlen(tmp) >= 2) // keep "/"
+                    mp_path_strip_trailing_separator(tmp);
+                write_redirect(mpctx, tmp);
+            }
+        }
+    }
 
 exit:
     talloc_free(conffile);

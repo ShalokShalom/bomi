@@ -5,18 +5,18 @@
  *
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -58,38 +58,27 @@ const struct formatmap_entry formats[] = {
     {SDL_PIXELFORMAT_UYVY, IMGFMT_UYVY, 0},
     //{SDL_PIXELFORMAT_YVYU, IMGFMT_YVYU, 0},
 #if BYTE_ORDER == BIG_ENDIAN
-    {SDL_PIXELFORMAT_RGBX8888, IMGFMT_RGBA, 0}, // has no alpha -> bad for OSD
-    {SDL_PIXELFORMAT_BGRX8888, IMGFMT_BGRA, 0}, // has no alpha -> bad for OSD
+    {SDL_PIXELFORMAT_RGB888, IMGFMT_0RGB, 0}, // RGB888 means XRGB8888
+    {SDL_PIXELFORMAT_RGBX8888, IMGFMT_RGB0, 0}, // has no alpha -> bad for OSD
+    {SDL_PIXELFORMAT_BGR888, IMGFMT_0BGR, 0}, // BGR888 means XBGR8888
+    {SDL_PIXELFORMAT_BGRX8888, IMGFMT_BGR0, 0}, // has no alpha -> bad for OSD
     {SDL_PIXELFORMAT_ARGB8888, IMGFMT_ARGB, 1}, // matches SUBBITMAP_RGBA
     {SDL_PIXELFORMAT_RGBA8888, IMGFMT_RGBA, 1},
     {SDL_PIXELFORMAT_ABGR8888, IMGFMT_ABGR, 1},
     {SDL_PIXELFORMAT_BGRA8888, IMGFMT_BGRA, 1},
-    {SDL_PIXELFORMAT_RGB24, IMGFMT_RGB24, 0},
-    {SDL_PIXELFORMAT_BGR24, IMGFMT_BGR24, 0},
-    {SDL_PIXELFORMAT_RGB888, IMGFMT_RGB24, 0},
-    {SDL_PIXELFORMAT_BGR888, IMGFMT_BGR24, 0},
-    {SDL_PIXELFORMAT_RGB565, IMGFMT_BGR565, 0},
-    {SDL_PIXELFORMAT_BGR565, IMGFMT_RGB565, 0},
-    {SDL_PIXELFORMAT_RGB555, IMGFMT_BGR555, 0},
-    {SDL_PIXELFORMAT_BGR555, IMGFMT_RGB555, 0},
-    {SDL_PIXELFORMAT_RGB444, IMGFMT_BGR444, 0}
 #else
-    {SDL_PIXELFORMAT_RGBX8888, IMGFMT_ABGR, 0}, // has no alpha -> bad for OSD
-    {SDL_PIXELFORMAT_BGRX8888, IMGFMT_ARGB, 0}, // has no alpha -> bad for OSD
+    {SDL_PIXELFORMAT_RGB888, IMGFMT_BGR0, 0}, // RGB888 means XRGB8888
+    {SDL_PIXELFORMAT_RGBX8888, IMGFMT_0BGR, 0}, // has no alpha -> bad for OSD
+    {SDL_PIXELFORMAT_BGR888, IMGFMT_RGB0, 0}, // BGR888 means XBGR8888
+    {SDL_PIXELFORMAT_BGRX8888, IMGFMT_0RGB, 0}, // has no alpha -> bad for OSD
     {SDL_PIXELFORMAT_ARGB8888, IMGFMT_BGRA, 1}, // matches SUBBITMAP_RGBA
     {SDL_PIXELFORMAT_RGBA8888, IMGFMT_ABGR, 1},
     {SDL_PIXELFORMAT_ABGR8888, IMGFMT_RGBA, 1},
     {SDL_PIXELFORMAT_BGRA8888, IMGFMT_ARGB, 1},
+#endif
     {SDL_PIXELFORMAT_RGB24, IMGFMT_RGB24, 0},
     {SDL_PIXELFORMAT_BGR24, IMGFMT_BGR24, 0},
-    {SDL_PIXELFORMAT_RGB888, IMGFMT_BGR24, 0},
-    {SDL_PIXELFORMAT_BGR888, IMGFMT_RGB24, 0},
     {SDL_PIXELFORMAT_RGB565, IMGFMT_RGB565, 0},
-    {SDL_PIXELFORMAT_BGR565, IMGFMT_RGB565, 0},
-    {SDL_PIXELFORMAT_RGB555, IMGFMT_RGB555, 0},
-    {SDL_PIXELFORMAT_BGR555, IMGFMT_BGR555, 0},
-    {SDL_PIXELFORMAT_RGB444, IMGFMT_RGB444, 0}
-#endif
 };
 
 struct keymap_entry {
@@ -190,6 +179,7 @@ struct priv {
     double osd_pts;
     int mouse_hidden;
     int brightness, contrast;
+    char *window_title;
     Uint32 wakeup_event;
 
     // options
@@ -353,6 +343,9 @@ static bool try_create_renderer(struct vo *vo, int i, const char *driver,
         vc->renderer_index = i;
     }
 
+    if (vc->window_title)
+        SDL_SetWindowTitle(vc->window, vc->window_title);
+
     return true;
 }
 
@@ -453,7 +446,7 @@ static void update_screeninfo(struct vo *vo, struct mp_rect *screenrc)
     *screenrc = (struct mp_rect){0, 0, mode.w, mode.h};
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     struct priv *vc = vo->priv;
 
@@ -519,8 +512,6 @@ static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
 
     set_fullscreen(vo);
 
-    SDL_SetWindowTitle(vc->window, vo_get_window_title(vo));
-
     SDL_ShowWindow(vc->window);
 
     check_resize(vo);
@@ -542,7 +533,7 @@ static void wakeup(struct vo *vo)
     SDL_PushEvent(&event);
 }
 
-static int wait_events(struct vo *vo, int64_t until_time_us)
+static void wait_events(struct vo *vo, int64_t until_time_us)
 {
     int64_t wait_us = until_time_us - mp_time_us();
     int timeout_ms = MPCLAMP((wait_us + 500) / 1000, 0, 10000);
@@ -628,8 +619,6 @@ static int wait_events(struct vo *vo, int64_t until_time_us)
             break;
         }
     }
-
-    return 0;
 }
 
 static void uninit(struct vo *vo)
@@ -907,6 +896,8 @@ static void draw_image(struct vo *vo, mp_image_t *mpi)
         mp_image_copy(&texmpi, mpi);
 
         SDL_UnlockTexture(vc->tex);
+
+        talloc_free(mpi);
     }
 
     SDL_Rect src, dst;
@@ -984,14 +975,11 @@ static int control(struct vo *vo, uint32_t request, void *data)
 
     switch (request) {
     case VOCTRL_FULLSCREEN:
-        vo->opts->fullscreen = !vo->opts->fullscreen;
         set_fullscreen(vo);
         return 1;
     case VOCTRL_REDRAW_FRAME:
         draw_image(vo, NULL);
         return 1;
-    case VOCTRL_GET_PANSCAN:
-        return VO_TRUE;
     case VOCTRL_SET_PANSCAN:
         force_resize(vo);
         return VO_TRUE;
@@ -1010,8 +998,10 @@ static int control(struct vo *vo, uint32_t request, void *data)
         SDL_ShowCursor(*(bool *)data);
         return true;
     case VOCTRL_UPDATE_WINDOW_TITLE:
-        if (vc->window)
-            SDL_SetWindowTitle(vc->window, vo_get_window_title(vo));
+        talloc_free(vc->window_title);
+        vc->window_title = talloc_strdup(vc, (char *)data);
+        if (vc->window && vc->window_title)
+            SDL_SetWindowTitle(vc->window, vc->window_title);
         return true;
     }
     return VO_NOTIMPL;
@@ -1042,4 +1032,5 @@ const struct vo_driver video_out_sdl = {
     .flip_page = flip_page,
     .wait_events = wait_events,
     .wakeup = wakeup,
+    .options_prefix = "sdl",
 };

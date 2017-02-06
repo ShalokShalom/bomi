@@ -22,6 +22,7 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavutil/mem.h>
+#include <libavutil/opt.h>
 
 #include "config.h"
 
@@ -32,7 +33,7 @@
 #include "osdep/io.h"
 
 #include "image_writer.h"
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "video/img_format.h"
 #include "video/mp_image.h"
 #include "video/fmt-conversion.h"
@@ -46,31 +47,23 @@ const struct image_writer_opts image_writer_opts_defaults = {
     .png_compression = 7,
     .png_filter = 5,
     .jpeg_quality = 90,
-    .jpeg_optimize = 100,
     .jpeg_smooth = 0,
-    .jpeg_baseline = 1,
     .jpeg_source_chroma = 1,
-    .tag_csp = 1,
+    .tag_csp = 0,
 };
 
 #define OPT_BASE_STRUCT struct image_writer_opts
 
-const struct m_sub_options image_writer_conf = {
-    .opts = (const m_option_t[]) {
-        OPT_INTRANGE("jpeg-quality", jpeg_quality, 0, 0, 100),
-        OPT_INTRANGE("jpeg-optimize", jpeg_optimize, 0, 0, 100),
-        OPT_INTRANGE("jpeg-smooth", jpeg_smooth, 0, 0, 100),
-        OPT_FLAG("jpeg-baseline", jpeg_baseline, 0),
-        OPT_FLAG("jpeg-source-chroma", jpeg_source_chroma, 0),
-        OPT_INTRANGE("png-compression", png_compression, 0, 0, 9),
-        OPT_INTRANGE("png-filter", png_filter, 0, 0, 5),
-        OPT_STRING("format", format, 0),
-        OPT_FLAG("high-bit-depth", high_bit_depth, 0),
-        OPT_FLAG("tag-colorspace", tag_csp, 0),
-        {0},
-    },
-    .size = sizeof(struct image_writer_opts),
-    .defaults = &image_writer_opts_defaults,
+const struct m_option image_writer_opts[] = {
+    OPT_INTRANGE("jpeg-quality", jpeg_quality, 0, 0, 100),
+    OPT_INTRANGE("jpeg-smooth", jpeg_smooth, 0, 0, 100),
+    OPT_FLAG("jpeg-source-chroma", jpeg_source_chroma, 0),
+    OPT_INTRANGE("png-compression", png_compression, 0, 0, 9),
+    OPT_INTRANGE("png-filter", png_filter, 0, 0, 5),
+    OPT_STRING("format", format, 0),
+    OPT_FLAG("high-bit-depth", high_bit_depth, 0),
+    OPT_FLAG("tag-colorspace", tag_csp, 0),
+    {0},
 };
 
 struct image_writer_ctx {
@@ -115,7 +108,8 @@ static bool write_lavc(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     }
     if (ctx->writer->lavc_codec == AV_CODEC_ID_PNG) {
         avctx->compression_level = ctx->opts->png_compression;
-        avctx->prediction_method = ctx->opts->png_filter;
+        av_opt_set_int(avctx, "pred", ctx->opts->png_filter,
+                       AV_OPT_SEARCH_CHILDREN);
     }
 
     if (avcodec_open2(avctx, codec, NULL) < 0) {
@@ -135,12 +129,18 @@ static bool write_lavc(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     pic->width = avctx->width;
     pic->height = avctx->height;
     if (ctx->opts->tag_csp) {
-        pic->color_primaries = mp_csp_prim_to_avcol_pri(image->params.primaries);
-        pic->color_trc = mp_csp_trc_to_avcol_trc(image->params.gamma);
+        pic->color_primaries = mp_csp_prim_to_avcol_pri(image->params.color.primaries);
+        pic->color_trc = mp_csp_trc_to_avcol_trc(image->params.color.gamma);
     }
-    int ret = avcodec_encode_video2(avctx, &pkt, pic, &got_output);
+
+    int ret = avcodec_send_frame(avctx, pic);
     if (ret < 0)
         goto error_exit;
+    avcodec_send_frame(avctx, NULL); // send EOF
+    ret = avcodec_receive_packet(avctx, &pkt);
+    if (ret < 0)
+        goto error_exit;
+    got_output = 1;
 
     fwrite(pkt.data, pkt.size, 1, fp);
 
@@ -150,7 +150,7 @@ error_exit:
         avcodec_close(avctx);
     av_free(avctx);
     av_frame_free(&pic);
-    av_free_packet(&pkt);
+    av_packet_unref(&pkt);
     return success;
 }
 
@@ -193,8 +193,7 @@ static bool write_jpeg(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     cinfo.JFIF_minor_version = 2;
 
     jpeg_set_defaults(&cinfo);
-    jpeg_set_quality(&cinfo, ctx->opts->jpeg_quality, ctx->opts->jpeg_baseline);
-    cinfo.optimize_coding = ctx->opts->jpeg_optimize;
+    jpeg_set_quality(&cinfo, ctx->opts->jpeg_quality, 0);
     cinfo.smoothing_factor = ctx->opts->jpeg_smooth;
 
     if (ctx->opts->jpeg_source_chroma) {
@@ -207,7 +206,7 @@ static bool write_jpeg(struct image_writer_ctx *ctx, mp_image_t *image, FILE *fp
     while (cinfo.next_scanline < cinfo.image_height) {
         JSAMPROW row_pointer[1];
         row_pointer[0] = image->planes[0] +
-                         cinfo.next_scanline * image->stride[0];
+                         (ptrdiff_t)cinfo.next_scanline * image->stride[0];
         jpeg_write_scanlines(&cinfo, row_pointer,1);
     }
 
@@ -296,8 +295,8 @@ const char *image_writer_file_ext(const struct image_writer_opts *opts)
 struct mp_image *convert_image(struct mp_image *image, int destfmt,
                                struct mp_log *log)
 {
-    int d_w = image->params.d_w;
-    int d_h = image->params.d_h;
+    int d_w, d_h;
+    mp_image_params_get_dsize(&image->params, &d_w, &d_h);
     bool is_anamorphic = image->w != d_w || image->h != d_h;
 
     // Caveat: no colorspace/levels conversion done if pixel formats equal

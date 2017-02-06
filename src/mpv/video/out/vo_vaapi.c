@@ -32,8 +32,9 @@
 #include "common/msg.h"
 #include "video/out/vo.h"
 #include "video/mp_image_pool.h"
-#include "sub/osd.h"
+#include "video/sws_utils.h"
 #include "sub/img_convert.h"
+#include "sub/osd.h"
 #include "x11_common.h"
 
 #include "video/mp_image.h"
@@ -58,7 +59,6 @@ struct vaapi_osd_part {
     int change_id;
     struct vaapi_osd_image image;
     struct vaapi_subpic subpic;
-    struct osd_conv_cache *conv_cache;
 };
 
 #define MAX_OUTPUT_SURFACES 2
@@ -68,7 +68,6 @@ struct priv {
     struct vo               *vo;
     VADisplay                display;
     struct mp_vaapi_ctx     *mpvaapi;
-    struct mp_hwdec_info     hwdec_info;
 
     struct mp_image_params   image_params;
     struct mp_rect           src_rect;
@@ -82,16 +81,12 @@ struct priv {
     int                      visible_surface;
     int                      scaling;
     int                      force_scaled_osd;
-    // with old libva versions only
-    int                      deint;
-    int                      deint_type;
 
     VAImageFormat            osd_format; // corresponds to OSD_VA_FORMAT
     struct vaapi_osd_part    osd_parts[MAX_OSD_PARTS];
     bool                     osd_screen;
 
     struct mp_image_pool    *pool;
-    struct va_image_formats *va_image_formats;
 
     struct mp_image         *black_surface;
 
@@ -156,13 +151,13 @@ static void resize(struct priv *p)
     p->vo->want_redraw = true;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     struct priv *p = vo->priv;
 
     free_video_specific(p);
 
-    vo_x11_config_vo_window(vo, NULL, flags, "vaapi");
+    vo_x11_config_vo_window(vo);
 
     if (params->imgfmt != IMGFMT_VAAPI) {
         if (!alloc_swdec_surfaces(p, params->w, params->h, params->imgfmt))
@@ -207,11 +202,8 @@ static bool render_to_screen(struct priv *p, struct mp_image *mpi)
         surface = va_surface_id(p->black_surface);
     }
 
-    int fields = mpi ? mpi->fields : 0;
     if (surface == VA_INVALID_ID)
         return false;
-
-    va_lock(p->mpvaapi);
 
     for (int n = 0; n < MAX_OSD_PARTS; n++) {
         struct vaapi_osd_part *part = &p->osd_parts[n];
@@ -220,23 +212,19 @@ static bool render_to_screen(struct priv *p, struct mp_image *mpi)
             int flags = 0;
             if (p->osd_screen)
                 flags |= VA_SUBPICTURE_DESTINATION_IS_SCREEN_COORD;
-            status = vaAssociateSubpicture2(p->display,
-                                            sp->id, &surface, 1,
-                                            sp->src_x, sp->src_y,
-                                            sp->src_w, sp->src_h,
-                                            sp->dst_x, sp->dst_y,
-                                            sp->dst_w, sp->dst_h,
-                                            flags);
+            status = vaAssociateSubpicture(p->display,
+                                           sp->id, &surface, 1,
+                                           sp->src_x, sp->src_y,
+                                           sp->src_w, sp->src_h,
+                                           sp->dst_x, sp->dst_y,
+                                           sp->dst_w, sp->dst_h,
+                                           flags);
             CHECK_VA_STATUS(p, "vaAssociateSubpicture()");
         }
     }
 
-    int flags = va_get_colorspace_flag(p->image_params.colorspace) | p->scaling;
-    if (p->deint && (fields & MP_IMGFIELD_INTERLACED)) {
-        flags |= (fields & MP_IMGFIELD_TOP_FIRST) ? VA_BOTTOM_FIELD : VA_TOP_FIELD;
-    } else {
-        flags |= VA_FRAME_PICTURE;
-    }
+    int flags = va_get_colorspace_flag(p->image_params.color.space) |
+                p->scaling | VA_FRAME_PICTURE;
     status = vaPutSurface(p->display,
                           surface,
                           p->vo->x11->window,
@@ -261,8 +249,6 @@ static bool render_to_screen(struct priv *p, struct mp_image *mpi)
             CHECK_VA_STATUS(p, "vaDeassociateSubpicture()");
         }
     }
-
-    va_unlock(p->mpvaapi);
 
     return true;
 }
@@ -346,8 +332,6 @@ static void draw_osd_cb(void *pctx, struct sub_bitmaps *imgs)
     if (imgs->change_id != part->change_id) {
         part->change_id = imgs->change_id;
 
-        osd_scale_rgba(part->conv_cache, imgs);
-
         struct mp_rect bb;
         if (!mp_sub_bitmaps_bb(imgs, &bb))
             goto error;
@@ -375,6 +359,25 @@ static void draw_osd_cb(void *pctx, struct sub_bitmaps *imgs)
         for (int n = 0; n < imgs->num_parts; n++) {
             struct sub_bitmap *sub = &imgs->parts[n];
 
+            struct mp_image src = {0};
+            mp_image_setfmt(&src, IMGFMT_BGRA);
+            mp_image_set_size(&src, sub->w, sub->h);
+            src.planes[0] = sub->bitmap;
+            src.stride[0] = sub->stride;
+
+            struct mp_image *bmp = &src;
+
+            struct mp_image *tmp = NULL;
+            if (sub->dw != sub->w || sub->dh != sub->h) {
+                tmp = mp_image_alloc(IMGFMT_BGRA, sub->dw, sub->dh);
+                if (!tmp)
+                    goto error;
+
+                mp_image_swscale(tmp, &src, mp_sws_fast_flags);
+
+                bmp = tmp;
+            }
+
             // Note: nothing guarantees that the sub-bitmaps don't overlap.
             //       But in all currently existing cases, they don't.
             //       We simply hope that this won't change, and nobody will
@@ -383,8 +386,10 @@ static void draw_osd_cb(void *pctx, struct sub_bitmaps *imgs)
             size_t dst = (sub->y - bb.y0) * vaimg.stride[0] +
                          (sub->x - bb.x0) * 4;
 
-            memcpy_pic(vaimg.planes[0] + dst, sub->bitmap, sub->w * 4, sub->h,
-                       vaimg.stride[0], sub->stride);
+            memcpy_pic(vaimg.planes[0] + dst, bmp->planes[0], sub->dw * 4,
+                       sub->dh, vaimg.stride[0], bmp->stride[0]);
+
+            talloc_free(tmp);
         }
 
         if (!va_image_unmap(p->mpvaapi, &img->image))
@@ -415,8 +420,6 @@ static void draw_osd(struct vo *vo)
     if (!p->osd_format.fourcc)
         return;
 
-    va_lock(p->mpvaapi);
-
     struct mp_osd_res vid_res = osd_res_from_image_params(vo->params);
 
     struct mp_osd_res *res;
@@ -429,8 +432,6 @@ static void draw_osd(struct vo *vo)
     for (int n = 0; n < MAX_OSD_PARTS; n++)
         p->osd_parts[n].active = false;
     osd_draw(vo->osd, *res, pts, 0, osd_formats, draw_osd_cb, p);
-
-    va_unlock(p->mpvaapi);
 }
 
 static int get_displayattribtype(const char *name)
@@ -511,9 +512,7 @@ static int set_equalizer(struct priv *p, const char *name, int value)
     MP_VERBOSE(p, "Changing '%s' (range [%d, %d]) to %d\n", name,
                attr->max_value, attr->min_value, attr->value);
 
-    va_lock(p->mpvaapi);
     status = vaSetDisplayAttributes(p->display, attr, 1);
-    va_unlock(p->mpvaapi);
     if (!CHECK_VA_STATUS(p, "vaSetDisplayAttributes()"))
         return VO_FALSE;
     return VO_TRUE;
@@ -524,21 +523,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
     struct priv *p = vo->priv;
 
     switch (request) {
-    case VOCTRL_GET_DEINTERLACE:
-        if (!p->deint_type)
-            break;
-        *(int*)data = !!p->deint;
-        return VO_TRUE;
-    case VOCTRL_SET_DEINTERLACE:
-        if (!p->deint_type)
-            break;
-        p->deint = *(int*)data ? p->deint_type : 0;
-        return VO_TRUE;
-    case VOCTRL_GET_HWDEC_INFO: {
-        struct mp_hwdec_info **arg = data;
-        *arg = &p->hwdec_info;
-        return true;
-    }
     case VOCTRL_SET_EQUALIZER: {
         struct voctrl_set_equalizer_args *eq = data;
         return set_equalizer(p, eq->name, eq->value);
@@ -551,8 +535,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
         p->output_surface = p->visible_surface;
         draw_osd(vo);
         return true;
-    case VOCTRL_GET_PANSCAN:
-        return VO_TRUE;
     case VOCTRL_SET_PANSCAN:
         resize(p);
         return VO_TRUE;
@@ -580,6 +562,11 @@ static void uninit(struct vo *vo)
         free_subpicture(p, &part->image);
     }
 
+    if (vo->hwdec_devs) {
+        hwdec_devices_remove(vo->hwdec_devs, &p->mpvaapi->hwctx);
+        hwdec_devices_destroy(vo->hwdec_devs);
+    }
+
     va_destroy(p->mpvaapi);
 
     vo_x11_uninit(vo);
@@ -596,18 +583,19 @@ static int preinit(struct vo *vo)
     if (!vo_x11_init(vo))
         goto fail;
 
+    if (!vo_x11_create_vo_window(vo, NULL, "vaapi"))
+        goto fail;
+
     p->display = vaGetDisplay(vo->x11->display);
     if (!p->display)
         goto fail;
 
-    p->mpvaapi = va_initialize(p->display, p->log);
+    p->mpvaapi = va_initialize(p->display, p->log, false);
     if (!p->mpvaapi) {
         vaTerminate(p->display);
         p->display = NULL;
         goto fail;
     }
-
-    p->hwdec_info.hwctx = &p->mpvaapi->hwctx;
 
     if (va_guess_if_emulated(p->mpvaapi)) {
         MP_WARN(vo, "VA-API is most likely emulated via VDPAU.\n"
@@ -616,7 +604,6 @@ static int preinit(struct vo *vo)
 
     p->pool = mp_image_pool_new(MAX_OUTPUT_SURFACES + 3);
     va_pool_set_allocator(p->pool, p->mpvaapi, VA_RT_FORMAT_YUV420);
-    p->va_image_formats = p->mpvaapi->image_formats;
 
     int max_subpic_formats = vaMaxNumSubpictureFormats(p->display);
     p->va_subpic_formats = talloc_array(vo, VAImageFormat, max_subpic_formats);
@@ -632,7 +619,7 @@ static int preinit(struct vo *vo)
 
     for (int i = 0; i < p->va_num_subpic_formats; i++) {
         MP_VERBOSE(vo, "  %s, flags 0x%x\n",
-                   VA_STR_FOURCC(p->va_subpic_formats[i].fourcc),
+                   mp_tag_str(p->va_subpic_formats[i].fourcc),
                    p->va_subpic_flags[i]);
         if (p->va_subpic_formats[i].fourcc == OSD_VA_FORMAT) {
             p->osd_format = p->va_subpic_formats[i];
@@ -650,7 +637,6 @@ static int preinit(struct vo *vo)
         struct vaapi_osd_part *part = &p->osd_parts[n];
         part->image.image.image_id = VA_INVALID_ID;
         part->image.subpic_id = VA_INVALID_ID;
-        part->conv_cache = talloc_steal(vo, osd_conv_cache_new());
     }
 
     int max_display_attrs = vaMaxNumDisplayAttributes(p->display);
@@ -662,6 +648,10 @@ static int preinit(struct vo *vo)
             p->va_num_display_attrs = 0;
         p->mp_display_attr = talloc_zero_array(vo, int, p->va_num_display_attrs);
     }
+
+    vo->hwdec_devs = hwdec_devices_create();
+    hwdec_devices_add(vo->hwdec_devs, &p->mpvaapi->hwctx);
+
     return 0;
 
 fail:
@@ -680,28 +670,21 @@ const struct vo_driver video_out_vaapi = {
     .control = control,
     .draw_image = draw_image,
     .flip_page = flip_page,
+    .wakeup = vo_x11_wakeup,
+    .wait_events = vo_x11_wait_events,
     .uninit = uninit,
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .scaling = VA_FILTER_SCALING_DEFAULT,
-        .deint = 0,
-#if !HAVE_VAAPI_VPP
-        .deint_type = 2,
-#endif
     },
     .options = (const struct m_option[]) {
-#if USE_VAAPI_SCALING
         OPT_CHOICE("scaling", scaling, 0,
                    ({"default", VA_FILTER_SCALING_DEFAULT},
                     {"fast", VA_FILTER_SCALING_FAST},
                     {"hq", VA_FILTER_SCALING_HQ},
                     {"nla", VA_FILTER_SCALING_NL_ANAMORPHIC})),
-#endif
-        OPT_CHOICE("deint", deint_type, 0,
-                   ({"no", 0},
-                    {"first-field", 1},
-                    {"bob", 2})),
         OPT_FLAG("scaled-osd", force_scaled_osd, 0),
         {0}
     },
+    .options_prefix = "vo-vaapi",
 };

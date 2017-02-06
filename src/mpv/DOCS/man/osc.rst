@@ -20,22 +20,25 @@ The Interface
 
 ::
 
-    +------------------+-----------+--------------------+
-    | playlist prev    |   title   |      playlist next |
-    +-------+------+---+--+------+-+----+------+--------+
-    | audio | skip | seek |      | seek | skip |  full  |
-    +-------+ back | back | play | frwd | frwd | screen |
-    | sub   |      |      |      |      |      |        |
-    +-------+------+------+------+------+------+--------+
-    |                     seekbar                       |
-    +----------------+--------------+-------------------+
-    | time passed    | cache status |    time remaining |
-    +----------------+--------------+-------------------+
+    +---------+----------+----------------------------+-------------+
+    | pl prev | pl next  |  title                     |       cache |
+    +------+--+---+------+---------+-----------+------+-------+-----+
+    | play | skip | skip | time    |  seekbar  | time | audio | sub |
+    |      | back | frwd | elapsed |           | left |       |     |
+    +------+------+------+---------+-----------+------+-------+-----+
 
 
-playlist prev
+pl prev
     =============   ================================================
     left-click      play previous file in playlist
+    right-click     show playlist
+    shift+L-click   show playlist
+    =============   ================================================
+
+pl next
+    =============   ================================================
+    left-click      play next file in playlist
+    right-click     show playlist
     shift+L-click   show playlist
     =============   ================================================
 
@@ -47,10 +50,47 @@ title
     right-click     show filename
     =============   ================================================
 
-playlist next
+cache
+    | Shows current cache fill status
+
+play
     =============   ================================================
-    left-click      play next file in playlist
-    shift+L-click   show playlist
+    left-click      toggle play/pause
+    =============   ================================================
+
+skip back
+    =============   ================================================
+    left-click      go to beginning of chapter / previous chapter
+    right-click     show chapters
+    shift+L-click   show chapters
+    =============   ================================================
+
+skip frwd
+    =============   ================================================
+    left-click      go to next chapter
+    right-click     show chapters
+    shift+L-click   show chapters
+    =============   ================================================
+
+time elapsed
+    | Shows current playback position timestamp
+
+    =============   ================================================
+    left-click      toggle displaying timecodes with milliseconds
+    =============   ================================================
+
+seekbar
+    | Indicates current playback position and position of chapters
+
+    =============   ================================================
+    left-click      seek to position
+    =============   ================================================
+
+time left
+    | Shows remaining playback time timestamp
+
+    =============   ================================================
+    left-click      toggle between total and remaining time
     =============   ================================================
 
 audio and sub
@@ -62,66 +102,6 @@ audio and sub
     shift+L-click   show available audio/sub tracks
     =============   ================================================
 
-skip back
-    =============   ================================================
-    left-click      go to beginning of chapter / previous chapter
-    shift+L-click   show chapters
-    =============   ================================================
-
-seek back
-    =============   ================================================
-    left-click      skip back  5 seconds
-    right-click     skip back 30 seconds
-    shift-L-click   skip back  1 frame
-    =============   ================================================
-
-play
-    =============   ================================================
-    left-click      toggle play/pause
-    =============   ================================================
-
-seek frwd
-    =============   ================================================
-    left-click      skip forward 10 seconds
-    right-click     skip forward 60 seconds
-    shift-L-click   skip forward  1 frame
-    =============   ================================================
-
-skip frwd
-    =============   ================================================
-    left-click      go to next chapter
-    shift+L-click   show chapters
-    =============   ================================================
-
-fullscreen
-    =============   ================================================
-    left-click      toggle fullscreen
-    =============   ================================================
-
-seekbar
-    | Indicates current playback position and position of chapters
-
-    =============   ================================================
-    left-click      seek to position
-    =============   ================================================
-
-time passed
-    | Shows current playback position timestamp
-
-    =============   ================================================
-    left-click      toggle displaying timecodes with milliseconds
-    =============   ================================================
-
-cache status
-    | Shows current cache fill status (only visible when below 45%)
-
-time remaining
-    | Shows remaining playback time timestamp
-
-    =============   ================================================
-    left-click      toggle between total and remaining time
-    =============   ================================================
-
 Key Bindings
 ~~~~~~~~~~~~
 
@@ -130,7 +110,7 @@ these keys. In case of collision, the function needs to be bound to a
 different key. See the `Script Commands`_ section.
 
 =============   ================================================
-del             Hide the OSC permanently until mpv is restarted.
+del             Cycles visibility between never / auto (mouse-move) / always
 =============   ================================================
 
 Configuration
@@ -167,73 +147,117 @@ Example::
 Configurable Options
 ~~~~~~~~~~~~~~~~~~~~
 
-``showwindowed``
-    | Default: yes
-    | Enable the OSC when windowed
-
-``showfullscreen``
-    | Default: yes
-    | Enable the OSC when fullscreen
-
-``scalewindowed``
-    | Default: 1.0
-    | Scale factor of the OSC when windowed
-
-``scalefullscreen``
-    | Default: 1.0
-    | Scale factor of the OSC when fullscreen
-
-``scaleforcedwindow``
-    | Default: 2.0
-    | Scale factor of the OSC when rendered on a forced (dummy) window
-
-``vidscale``
-    | Default: yes
-    | Scale the OSC with the video
-    | ``no`` tries to keep the OSC size constant as much as the window size allows
-
-``valign``
-    | Default: 0.8
-    | Vertical alignment, -1 (top) to 1 (bottom)
-
-``halign``
-    | Default: 0.0
-    | Horizontal alignment, -1 (left) to 1 (right)
-
-``boxalpha``
-    | Default: 80
-    | Alpha of the background box, 0 (opaque) to 255 (fully transparent)
-
-``hidetimeout``
-    | Default: 500
-    | Duration in ms until the OSC hides if no mouse movement, negative value
-      disables auto-hide
-
-``fadeduration``
-    | Default: 200
-    | Duration of fade out in ms, 0 = no fade
-
-``deadzonesize``
-    | Default: 0
-    | Size of the deadzone. The deadzone is an area that makes the mouse act
-      like leaving the window. Movement there won't make the OSC show up and
-      it will hide immediately if the mouse enters it. The deadzone starts
-      at the window border opposite to the OSC and the size controls how much
-      of the window it will span. Values between 0 and 1.
-
-``minmousemove``
-    | Default: 3
-    | Minimum amount of pixels the mouse has to move between ticks to make
-      the OSC show up
-
 ``layout``
-    | Default: box
-    | The layout for the OSC. Currently available are: box, slimbox,
-      bottombar and topbar.
+    Default: bottombar
+
+    The layout for the OSC. Currently available are: box, slimbox,
+    bottombar and topbar. Default pre-0.21.0 was 'box'.
 
 ``seekbarstyle``
-    | Default: slider
-    | Sets the style of the seekbar, slider (diamond marker) or bar (fill)
+    Default: bar
+
+    Sets the style of the seekbar, slider (diamond marker), knob (circle
+    marker with guide), or bar (fill).
+    Default pre-0.21.0 was 'slider'.
+
+``deadzonesize``
+    Default: 0.5
+
+    Size of the deadzone. The deadzone is an area that makes the mouse act
+    like leaving the window. Movement there won't make the OSC show up and
+    it will hide immediately if the mouse enters it. The deadzone starts
+    at the window border opposite to the OSC and the size controls how much
+    of the window it will span. Values between 0.0 and 1.0, where 0 means the
+    OSC will always popup with mouse movement in the window, and 1 means the
+    OSC will only show up when the mouse hovers it. Default pre-0.21.0 was 0.
+
+``minmousemove``
+    Default: 0
+
+    Minimum amount of pixels the mouse has to move between ticks to make
+    the OSC show up. Default pre-0.21.0 was 3.
+
+``showwindowed``
+    Default: yes
+
+    Enable the OSC when windowed
+
+``showfullscreen``
+    Default: yes
+
+    Enable the OSC when fullscreen
+
+``scalewindowed``
+    Default: 1.0
+
+    Scale factor of the OSC when windowed.
+
+``scalefullscreen``
+    Default: 1.0
+
+    Scale factor of the OSC when fullscreen
+
+``scaleforcedwindow``
+    Default: 2.0
+
+    Scale factor of the OSC when rendered on a forced (dummy) window
+
+``vidscale``
+    Default: yes
+
+    Scale the OSC with the video
+    ``no`` tries to keep the OSC size constant as much as the window size allows
+
+``valign``
+    Default: 0.8
+
+    Vertical alignment, -1 (top) to 1 (bottom)
+
+``halign``
+    Default: 0.0
+
+    Horizontal alignment, -1 (left) to 1 (right)
+
+``barmargin``
+    Default: 0
+
+    Margin from bottom (bottombar) or top (topbar), in pixels
+
+``boxalpha``
+    Default: 80
+
+    Alpha of the background box, 0 (opaque) to 255 (fully transparent)
+
+``hidetimeout``
+    Default: 500
+
+    Duration in ms until the OSC hides if no mouse movement, must not be
+    negative
+
+``fadeduration``
+    Default: 200
+
+    Duration of fade out in ms, 0 = no fade
+
+``tooltipborder``
+    Default: 1
+
+    Size of the tooltip outline when using bottombar or topbar layouts
+
+``timetotal``
+    Default: no
+
+    Show total time instead of time remaining
+
+``timems``
+    Default: no
+
+    Display timecodes with milliseconds
+
+``visibility``
+    Default: auto (auto hide/show on mouse move)
+
+    Also supports ``never`` and ``always``
 
 Script Commands
 ~~~~~~~~~~~~~~~
@@ -241,22 +265,23 @@ Script Commands
 The OSC script listens to certain script commands. These commands can bound
 in ``input.conf``, or sent by other scripts.
 
-``enable-osc``
-    Undoes ``disable-osc`` or the effect of the ``del`` key.
-
-``disable-osc``
-    Hide the OSC permanently. This is also what the ``del`` key does.
-
 ``osc-message``
     Show a message on screen using the OSC. First argument is the message,
     second the duration in seconds.
 
+``osc-visibility``
+    Controls visibility mode ``never`` / ``auto`` (on mouse move) / ``always``
+    and also ``cycle`` to cycle between the modes
 
 Example
 
 You could put this into ``input.conf`` to hide the OSC with the ``a`` key and
-to unhide it with ``b``::
+to set auto mode (the default) with ``b``::
 
-    a script_message disable-osc
-    b script_message enable-osc
+    a script-message osc-visibility never
+    b script-message osc-visibility auto
+
+``osc-playlist``, ``osc-chapterlist``, ``osc-tracklist``
+    Shows a limited view of the respective type of list using the OSC. First
+    argument is duration in seconds.
 

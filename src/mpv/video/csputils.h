@@ -1,23 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with mpv.  If not, see <http://www.gnu.org/licenses/>.
- *
- * You can alternatively redistribute this file and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef MPLAYER_CSPUTILS_H
@@ -68,6 +63,8 @@ enum mp_csp_prim {
     MP_CSP_PRIM_ADOBE,
     MP_CSP_PRIM_PRO_PHOTO,
     MP_CSP_PRIM_CIE_1931,
+    MP_CSP_PRIM_DCI_P3,
+    MP_CSP_PRIM_V_GAMUT,
     MP_CSP_PRIM_COUNT
 };
 
@@ -82,6 +79,9 @@ enum mp_csp_trc {
     MP_CSP_TRC_GAMMA22,
     MP_CSP_TRC_GAMMA28,
     MP_CSP_TRC_PRO_PHOTO,
+    MP_CSP_TRC_SMPTE_ST2084,
+    MP_CSP_TRC_ARIB_STD_B67,
+    MP_CSP_TRC_V_LOG,
     MP_CSP_TRC_COUNT
 };
 
@@ -106,7 +106,7 @@ enum mp_stereo3d_mode {
     MP_STEREO3D_AB2L = 3,
     MP_STEREO3D_SBS2R = 11,
     /* no explicit enum entries for most valid values */
-    MP_STEREO3D_COUNT = 13, // 12 is last valid mode
+    MP_STEREO3D_COUNT = 15, // 14 is last valid mode
 };
 
 extern const struct m_opt_choice_alternatives mp_stereo3d_names[];
@@ -116,10 +116,21 @@ extern const struct m_opt_choice_alternatives mp_stereo3d_names[];
 #define MP_STEREO3D_NAME_DEF(x, def) \
     (MP_STEREO3D_NAME(x) ? MP_STEREO3D_NAME(x) : (def))
 
+struct mp_colorspace {
+    enum mp_csp space;
+    enum mp_csp_levels levels;
+    enum mp_csp_prim primaries;
+    enum mp_csp_trc gamma;
+    float nom_peak; // nominal (absolute) peak. 0 = auto/unknown
+    float sig_peak; // signal peak, highest value that occurs in the source
+};
+
+// Replaces unknown values in the first struct by those of the second struct
+void mp_colorspace_merge(struct mp_colorspace *orig, struct mp_colorspace *new);
+
 struct mp_csp_params {
-    enum mp_csp colorspace;
-    enum mp_csp_levels levels_in;      // encoded video
-    enum mp_csp_levels levels_out;     // output device
+    struct mp_colorspace color; // input colorspace
+    enum mp_csp_levels levels_out; // output device
     float brightness;
     float contrast;
     float hue;
@@ -130,14 +141,11 @@ struct mp_csp_params {
     // texture_bits/input_bits is for rescaling fixed point input to range [0,1]
     int texture_bits;
     int input_bits;
-    // for scaling integer input and output (if 0, assume range [0,1])
-    int int_bits_in;
-    int int_bits_out;
 };
 
 #define MP_CSP_PARAMS_DEFAULTS {                                \
-    .colorspace = MP_CSP_BT_601,                                \
-    .levels_in = MP_CSP_LEVELS_TV,                              \
+    .color = { .space = MP_CSP_BT_601,                          \
+               .levels = MP_CSP_LEVELS_TV },                    \
     .levels_out = MP_CSP_LEVELS_PC,                             \
     .brightness = 0, .contrast = 1, .hue = 0, .saturation = 1,  \
     .gamma = 1, .texture_bits = 8, .input_bits = 8}
@@ -145,6 +153,8 @@ struct mp_csp_params {
 struct mp_image_params;
 void mp_csp_set_image_params(struct mp_csp_params *params,
                              const struct mp_image_params *imgparams);
+
+bool mp_colorspace_equal(struct mp_colorspace c1, struct mp_colorspace c2);
 
 enum mp_chroma_location {
     MP_CHROMA_AUTO,
@@ -161,6 +171,7 @@ enum mp_csp_equalizer_param {
     MP_CSP_EQ_HUE,
     MP_CSP_EQ_SATURATION,
     MP_CSP_EQ_GAMMA,
+    MP_CSP_EQ_OUTPUT_LEVELS,
     MP_CSP_EQ_COUNT,
 };
 
@@ -168,7 +179,8 @@ enum mp_csp_equalizer_param {
     ( (1 << MP_CSP_EQ_BRIGHTNESS) \
     | (1 << MP_CSP_EQ_CONTRAST) \
     | (1 << MP_CSP_EQ_HUE) \
-    | (1 << MP_CSP_EQ_SATURATION) )
+    | (1 << MP_CSP_EQ_SATURATION) \
+    | (1 << MP_CSP_EQ_OUTPUT_LEVELS) )
 
 #define MP_CSP_EQ_CAPS_GAMMA (1 << MP_CSP_EQ_GAMMA)
 #define MP_CSP_EQ_CAPS_BRIGHTNESS (1 << MP_CSP_EQ_BRIGHTNESS)
@@ -195,27 +207,19 @@ struct mp_csp_primaries {
 
 void mp_csp_copy_equalizer_values(struct mp_csp_params *params,
                                   const struct mp_csp_equalizer *eq);
-
 int mp_csp_equalizer_set(struct mp_csp_equalizer *eq, const char *property,
                          int value);
-
 int mp_csp_equalizer_get(struct mp_csp_equalizer *eq, const char *property,
                          int *out_value);
 
 enum mp_csp avcol_spc_to_mp_csp(int avcolorspace);
-
 enum mp_csp_levels avcol_range_to_mp_csp_levels(int avrange);
-
 enum mp_csp_prim avcol_pri_to_mp_csp_prim(int avpri);
-
 enum mp_csp_trc avcol_trc_to_mp_csp_trc(int avtrc);
 
 int mp_csp_to_avcol_spc(enum mp_csp colorspace);
-
 int mp_csp_levels_to_avcol_range(enum mp_csp_levels range);
-
 int mp_csp_prim_to_avcol_pri(enum mp_csp_prim prim);
-
 int mp_csp_trc_to_avcol_trc(enum mp_csp_trc trc);
 
 enum mp_csp mp_csp_guess_colorspace(int width, int height);
@@ -223,10 +227,11 @@ enum mp_csp_prim mp_csp_guess_primaries(int width, int height);
 
 enum mp_chroma_location avchroma_location_to_mp(int avloc);
 int mp_chroma_location_to_av(enum mp_chroma_location mploc);
-
 void mp_get_chroma_location(enum mp_chroma_location loc, int *x, int *y);
 
 struct mp_csp_primaries mp_get_csp_primaries(enum mp_csp_prim csp);
+float mp_csp_trc_nom_peak(enum mp_csp_trc trc, float ref_peak);
+bool mp_trc_is_hdr(enum mp_csp_trc trc);
 
 /* Color conversion matrix: RGB = m * YUV + c
  * m is in row-major matrix, with m[row][col], e.g.:
@@ -249,12 +254,12 @@ struct mp_cmat {
 void mp_get_cms_matrix(struct mp_csp_primaries src, struct mp_csp_primaries dest,
                        enum mp_render_intent intent, float cms_matrix[3][3]);
 
-void mp_get_xyz2rgb_coeffs(struct mp_csp_params *params, struct mp_csp_primaries prim,
-                           enum mp_render_intent intent, struct mp_cmat *xyz2rgb);
-void mp_get_yuv2rgb_coeffs(struct mp_csp_params *params, struct mp_cmat *yuv2rgb);
+double mp_get_csp_mul(enum mp_csp csp, int input_bits, int texture_bits);
+void mp_get_csp_matrix(struct mp_csp_params *params, struct mp_cmat *out);
 
 void mp_invert_matrix3x3(float m[3][3]);
-void mp_invert_yuv2rgb(struct mp_cmat *out, struct mp_cmat *in);
-void mp_map_int_color(struct mp_cmat *matrix, int clip_bits, int c[3]);
+void mp_invert_cmat(struct mp_cmat *out, struct mp_cmat *in);
+void mp_map_fixp_color(struct mp_cmat *matrix, int ibits, int in[3],
+                                               int obits, int out[3]);
 
 #endif /* MPLAYER_CSPUTILS_H */

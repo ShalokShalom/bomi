@@ -41,6 +41,9 @@ struct spdifContext {
     bool             need_close;
     bool             use_dts_hd;
     struct mp_audio  fmt;
+    struct mp_audio_pool *pool;
+    bool             got_eof;
+    struct demux_packet *queued_packet;
 };
 
 static int write_packet(void *p, uint8_t *buf, int buf_size)
@@ -70,6 +73,8 @@ static void uninit(struct dec_audio *da)
             av_freep(&lavf_ctx->pb->buffer);
         av_freep(&lavf_ctx->pb);
         avformat_free_context(lavf_ctx);
+        talloc_free(spdif_ctx->queued_packet);
+        spdif_ctx->lavf_ctx = NULL;
     }
 }
 
@@ -79,22 +84,42 @@ static int init(struct dec_audio *da, const char *decoder)
     da->priv = spdif_ctx;
     spdif_ctx->log = da->log;
     spdif_ctx->use_dts_hd = da->opts->dtshd;
+    spdif_ctx->pool = mp_audio_pool_create(spdif_ctx);
 
-    if (strcmp(decoder, "dts-hd") == 0) {
-        decoder = "dts";
+    if (strcmp(decoder, "spdif_dts_hd") == 0)
         spdif_ctx->use_dts_hd = true;
-    }
 
-    spdif_ctx->codec_id = mp_codec_to_av_codec_id(decoder);
+    spdif_ctx->codec_id = mp_codec_to_av_codec_id(da->codec->codec);
     return spdif_ctx->codec_id != AV_CODEC_ID_NONE;
 }
 
-static int determine_codec_profile(struct dec_audio *da, AVPacket *pkt)
+static void determine_codec_params(struct dec_audio *da, AVPacket *pkt,
+                                   int *out_profile, int *out_rate)
 {
     struct spdifContext *spdif_ctx = da->priv;
     int profile = FF_PROFILE_UNKNOWN;
     AVCodecContext *ctx = NULL;
     AVFrame *frame = NULL;
+
+    AVCodecParserContext *parser = av_parser_init(spdif_ctx->codec_id);
+    if (parser) {
+        // Don't make it wait for the next frame.
+        parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
+
+        ctx = avcodec_alloc_context3(NULL);
+
+        uint8_t *d = NULL;
+        int s = 0;
+        av_parser_parse2(parser, ctx, &d, &s, pkt->data, pkt->size, 0, 0, 0);
+        *out_profile = profile = ctx->profile;
+        *out_rate = ctx->sample_rate;
+
+        av_free(ctx);
+        av_parser_close(parser);
+    }
+
+    if (profile != FF_PROFILE_UNKNOWN || spdif_ctx->codec_id != AV_CODEC_ID_DTS)
+        return;
 
     AVCodec *codec = avcodec_find_decoder(spdif_ctx->codec_id);
     if (!codec)
@@ -114,11 +139,13 @@ static int determine_codec_profile(struct dec_audio *da, AVPacket *pkt)
         goto done;
     }
 
-    int got_frame = 0;
-    if (avcodec_decode_audio4(ctx, frame, &got_frame, pkt) < 1 || !got_frame)
+    if (avcodec_send_packet(ctx, pkt) < 0)
+        goto done;
+    if (avcodec_receive_frame(ctx, frame) < 0)
         goto done;
 
-    profile = ctx->profile;
+    *out_profile = profile = ctx->profile;
+    *out_rate = ctx->sample_rate;
 
 done:
     av_frame_free(&frame);
@@ -128,8 +155,6 @@ done:
 
     if (profile == FF_PROFILE_UNKNOWN)
         MP_WARN(da, "Failed to parse codec profile.\n");
-
-    return profile;
 }
 
 static int init_filter(struct dec_audio *da, AVPacket *pkt)
@@ -137,8 +162,9 @@ static int init_filter(struct dec_audio *da, AVPacket *pkt)
     struct spdifContext *spdif_ctx = da->priv;
 
     int profile = FF_PROFILE_UNKNOWN;
-    if (spdif_ctx->codec_id == AV_CODEC_ID_DTS)
-        profile = determine_codec_profile(da, pkt);
+    int c_rate = 0;
+    determine_codec_params(da, pkt, &profile, &c_rate);
+    MP_VERBOSE(da, "In: profile=%d samplerate=%d\n", profile, c_rate);
 
     AVFormatContext *lavf_ctx  = avformat_alloc_context();
     if (!lavf_ctx)
@@ -169,7 +195,7 @@ static int init_filter(struct dec_audio *da, AVPacket *pkt)
     if (!stream)
         goto fail;
 
-    stream->codec->codec_id = spdif_ctx->codec_id;
+    stream->codecpar->codec_id = spdif_ctx->codec_id;
 
     AVDictionary *format_opts = NULL;
 
@@ -184,12 +210,13 @@ static int init_filter(struct dec_audio *da, AVPacket *pkt)
         break;
     case AV_CODEC_ID_AC3:
         sample_format                   = AF_FORMAT_S_AC3;
-        samplerate                      = 48000;
+        samplerate                      = c_rate > 0 ? c_rate : 48000;
         num_channels                    = 2;
         break;
     case AV_CODEC_ID_DTS: {
         bool is_hd = profile == FF_PROFILE_DTS_HD_HRA ||
-                     profile == FF_PROFILE_DTS_HD_MA;
+                     profile == FF_PROFILE_DTS_HD_MA ||
+                     profile == FF_PROFILE_UNKNOWN;
         if (spdif_ctx->use_dts_hd && is_hd) {
             av_dict_set(&format_opts, "dtshd_rate", "768000", 0); // 4*192000
             sample_format               = AF_FORMAT_S_DTSHD;
@@ -240,48 +267,72 @@ fail:
     return -1;
 }
 
-static int decode_packet(struct dec_audio *da, struct mp_audio **out)
+
+static bool send_packet(struct dec_audio *da, struct demux_packet *mpkt)
 {
     struct spdifContext *spdif_ctx = da->priv;
 
-    spdif_ctx->out_buffer_len  = 0;
+    if (spdif_ctx->queued_packet || spdif_ctx->got_eof)
+        return false;
 
-    struct demux_packet *mpkt;
-    if (demux_read_packet_async(da->header, &mpkt) == 0)
-        return AD_WAIT;
+    spdif_ctx->queued_packet = mpkt ? demux_copy_packet(mpkt) : NULL;
+    spdif_ctx->got_eof = !mpkt;
+    return true;
+}
 
-    if (!mpkt)
-        return AD_EOF;
+static bool receive_frame(struct dec_audio *da, struct mp_audio **out)
+{
+    struct spdifContext *spdif_ctx = da->priv;
+
+    if (spdif_ctx->got_eof) {
+        spdif_ctx->got_eof = false;
+        return false;
+    }
+
+    if (!spdif_ctx->queued_packet)
+        return true;
+
+    double pts = spdif_ctx->queued_packet->pts;
 
     AVPacket pkt;
-    mp_set_av_packet(&pkt, mpkt, NULL);
+    mp_set_av_packet(&pkt, spdif_ctx->queued_packet, NULL);
     pkt.pts = pkt.dts = 0;
-    if (mpkt->pts != MP_NOPTS_VALUE) {
-        da->pts        = mpkt->pts;
-        da->pts_offset = 0;
-    }
     if (!spdif_ctx->lavf_ctx) {
         if (init_filter(da, &pkt) < 0)
-            return AD_ERR;
+            goto done;
     }
+    spdif_ctx->out_buffer_len  = 0;
     int ret = av_write_frame(spdif_ctx->lavf_ctx, &pkt);
-    talloc_free(mpkt);
     avio_flush(spdif_ctx->lavf_ctx->pb);
-    if (ret < 0)
-        return AD_ERR;
+    if (ret < 0) {
+        MP_ERR(da, "spdif mux error: '%s'\n", mp_strerror(AVUNERROR(ret)));
+        goto done;
+    }
 
     int samples = spdif_ctx->out_buffer_len / spdif_ctx->fmt.sstride;
-    *out = mp_audio_pool_get(da->pool, &spdif_ctx->fmt, samples);
+    *out = mp_audio_pool_get(spdif_ctx->pool, &spdif_ctx->fmt, samples);
     if (!*out)
-        return AD_ERR;
+        goto done;
 
     memcpy((*out)->planes[0], spdif_ctx->out_buffer, spdif_ctx->out_buffer_len);
+    (*out)->pts = pts;
 
-    return 0;
+done:
+    talloc_free(spdif_ctx->queued_packet);
+    spdif_ctx->queued_packet = NULL;
+    return true;
 }
 
 static int control(struct dec_audio *da, int cmd, void *arg)
 {
+    struct spdifContext *spdif_ctx = da->priv;
+    switch (cmd) {
+    case ADCTRL_RESET:
+        talloc_free(spdif_ctx->queued_packet);
+        spdif_ctx->queued_packet = NULL;
+        spdif_ctx->got_eof = false;
+        return CONTROL_TRUE;
+    }
     return CONTROL_UNKNOWN;
 }
 
@@ -295,24 +346,56 @@ static const int codecs[] = {
     AV_CODEC_ID_NONE
 };
 
-static void add_decoders(struct mp_decoder_list *list)
+static bool find_codec(const char *name)
 {
     for (int n = 0; codecs[n] != AV_CODEC_ID_NONE; n++) {
         const char *format = mp_codec_from_av_codec_id(codecs[n]);
-        if (format) {
-            mp_add_decoder(list, "spdif", format, format,
-                           "libavformat/spdifenc audio pass-through decoder");
+        if (format && name && strcmp(format, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+// codec is the libavcodec name of the source audio codec.
+// pref is a ","-separated list of names, some of them which do not match with
+// libavcodec names (like dts-hd).
+struct mp_decoder_list *select_spdif_codec(const char *codec, const char *pref)
+{
+    struct mp_decoder_list *list = talloc_zero(NULL, struct mp_decoder_list);
+
+    if (!find_codec(codec))
+        return list;
+
+    bool spdif_allowed = false, dts_hd_allowed = false;
+    bstr sel = bstr0(pref);
+    while (sel.len) {
+        bstr decoder;
+        bstr_split_tok(sel, ",", &decoder, &sel);
+        if (decoder.len) {
+            if (bstr_equals0(decoder, codec))
+                spdif_allowed = true;
+            if (bstr_equals0(decoder, "dts-hd") && strcmp(codec, "dts") == 0)
+                spdif_allowed = dts_hd_allowed = true;
         }
     }
-    mp_add_decoder(list, "spdif", "dts", "dts-hd",
+
+    if (!spdif_allowed)
+        return list;
+
+    const char *suffix_name = dts_hd_allowed ? "dts_hd" : codec;
+    char name[80];
+    snprintf(name, sizeof(name), "spdif_%s", suffix_name);
+    mp_add_decoder(list, "spdif", codec, name,
                    "libavformat/spdifenc audio pass-through decoder");
+    return list;
 }
 
 const struct ad_functions ad_spdif = {
     .name = "spdif",
-    .add_decoders = add_decoders,
+    .add_decoders = NULL,
     .init = init,
     .uninit = uninit,
     .control = control,
-    .decode_packet = decode_packet,
+    .send_packet = send_packet,
+    .receive_frame = receive_frame,
 };

@@ -39,10 +39,11 @@ static const struct vf_priv_s {
 
 //===========================================================================//
 
-static int config(struct vf_instance *vf,
-        int width, int height, int d_width, int d_height,
-        unsigned int flags, unsigned int outfmt)
+static int reconfig(struct vf_instance *vf, struct mp_image_params *in,
+                    struct mp_image_params *out)
 {
+    int width = in->w, height = in->h;
+
     // calculate the missing parameters:
     if(vf->priv->crop_w<=0 || vf->priv->crop_w>width) vf->priv->crop_w=width;
     if(vf->priv->crop_h<=0 || vf->priv->crop_h>height) vf->priv->crop_h=height;
@@ -50,39 +51,56 @@ static int config(struct vf_instance *vf,
     if(vf->priv->crop_y<0) vf->priv->crop_y=(height-vf->priv->crop_h)/2;
     // rounding:
 
-    struct mp_imgfmt_desc fmt = mp_imgfmt_get_desc(outfmt);
+    int orig_x = vf->priv->crop_x;
+    int orig_y = vf->priv->crop_y;
 
-    vf->priv->crop_x = MP_ALIGN_DOWN(vf->priv->crop_x, fmt.align_x);
-    vf->priv->crop_y = MP_ALIGN_DOWN(vf->priv->crop_y, fmt.align_y);
+    struct mp_imgfmt_desc fmt = mp_imgfmt_get_desc(in->imgfmt);
+
+    if (fmt.flags & MP_IMGFLAG_HWACCEL) {
+        vf->priv->crop_x = 0;
+        vf->priv->crop_y = 0;
+    } else {
+        vf->priv->crop_x = MP_ALIGN_DOWN(vf->priv->crop_x, fmt.align_x);
+        vf->priv->crop_y = MP_ALIGN_DOWN(vf->priv->crop_y, fmt.align_y);
+    }
+
+    if (vf->priv->crop_x != orig_x || vf->priv->crop_y != orig_y) {
+        MP_WARN(vf, "Adjusting crop origin to %d/%d for pixel format alignment.\n",
+                vf->priv->crop_x, vf->priv->crop_y);
+    }
 
     // check:
     if(vf->priv->crop_w+vf->priv->crop_x>width ||
        vf->priv->crop_h+vf->priv->crop_y>height){
         MP_WARN(vf, "Bad position/width/height - cropped area outside of the original!\n");
-        return 0;
+        return -1;
     }
-    vf_rescale_dsize(&d_width, &d_height, width, height,
-                     vf->priv->crop_w, vf->priv->crop_h);
-    return vf_next_config(vf,vf->priv->crop_w,vf->priv->crop_h,d_width,d_height,flags,outfmt);
+
+    *out = *in;
+    out->w = vf->priv->crop_w;
+    out->h = vf->priv->crop_h;
+    return 0;
 }
 
 static struct mp_image *filter(struct vf_instance *vf, struct mp_image *mpi)
 {
-    mp_image_crop(mpi, vf->priv->crop_x, vf->priv->crop_y,
-                  vf->priv->crop_x + vf->priv->crop_w,
-                  vf->priv->crop_y + vf->priv->crop_h);
+    if (mpi->fmt.flags & MP_IMGFLAG_HWACCEL) {
+        mp_image_set_size(mpi, vf->fmt_out.w, vf->fmt_out.h);
+    } else {
+        mp_image_crop(mpi, vf->priv->crop_x, vf->priv->crop_y,
+                      vf->priv->crop_x + vf->priv->crop_w,
+                      vf->priv->crop_y + vf->priv->crop_h);
+    }
     return mpi;
 }
 
 static int query_format(struct vf_instance *vf, unsigned int fmt)
 {
-    if (!IMGFMT_IS_HWACCEL(fmt))
-        return vf_next_query_format(vf, fmt);
-    return 0;
+    return vf_next_query_format(vf, fmt);
 }
 
 static int vf_open(vf_instance_t *vf){
-    vf->config=config;
+    vf->reconfig=reconfig;
     vf->filter=filter;
     vf->query_format=query_format;
     return 1;

@@ -76,7 +76,7 @@ const struct mp_cmd_def mp_cmds[] = {
   { MP_CMD_REVERT_SEEK, "revert-seek", {
       OARG_FLAGS(0, ({"mark", 1})),
   }},
-  { MP_CMD_QUIT, "quit", { OARG_INT(4) } },
+  { MP_CMD_QUIT, "quit", { OARG_INT(0) } },
   { MP_CMD_QUIT_WATCH_LATER, "quit-watch-later", { OARG_INT(0) } },
   { MP_CMD_STOP, "stop", },
   { MP_CMD_FRAME_STEP, "frame-step", .allow_auto_repeat = true,
@@ -146,7 +146,7 @@ const struct mp_cmd_def mp_cmds[] = {
   { MP_CMD_RUN, "run", { ARG_STRING, ARG_STRING }, .vararg = true },
 
   { MP_CMD_SET, "set", { ARG_STRING,  ARG_STRING } },
-  { MP_CMD_ADD, "add", { ARG_STRING, OARG_DOUBLE(0) },
+  { MP_CMD_ADD, "add", { ARG_STRING, OARG_DOUBLE(1) },
     .allow_auto_repeat = true},
   { MP_CMD_CYCLE, "cycle", {
       ARG_STRING,
@@ -162,23 +162,29 @@ const struct mp_cmd_def mp_cmds[] = {
 
   { MP_CMD_ENABLE_INPUT_SECTION,  "enable-section",  {
       ARG_STRING,
-      OARG_CHOICE(0, ({"default", 0},
-                      {"exclusive", 1})),
+      OARG_FLAGS(0, ({"default", 0},
+                     {"exclusive", MP_INPUT_EXCLUSIVE},
+                     {"allow-hide-cursor", MP_INPUT_ALLOW_HIDE_CURSOR},
+                     {"allow-vo-dragging", MP_INPUT_ALLOW_VO_DRAGGING})),
   }},
   { MP_CMD_DISABLE_INPUT_SECTION, "disable-section", { ARG_STRING } },
-
-  { MP_CMD_DISCNAV, "discnav", { ARG_STRING } },
+  { MP_CMD_DEFINE_INPUT_SECTION, "define-section", {
+      ARG_STRING,
+      ARG_STRING,
+      OARG_CHOICE(1, ({"default", 1},
+                      {"force", 0})),
+  }},
 
   { MP_CMD_AB_LOOP, "ab-loop", },
 
   { MP_CMD_DROP_BUFFERS, "drop-buffers", },
 
   { MP_CMD_AF, "af", { ARG_STRING, ARG_STRING } },
+  { MP_CMD_AF_COMMAND, "af-command", { ARG_STRING, ARG_STRING, ARG_STRING } },
   { MP_CMD_AO_RELOAD, "ao-reload", },
 
   { MP_CMD_VF, "vf", { ARG_STRING, ARG_STRING } },
-
-  { MP_CMD_VO_CMDLINE, "vo-cmdline", { ARG_STRING } },
+  { MP_CMD_VF_COMMAND, "vf-command", { ARG_STRING, ARG_STRING, ARG_STRING } },
 
   { MP_CMD_SCRIPT_BINDING, "script-binding", { ARG_STRING },
     .allow_auto_repeat = true, .on_updown = true},
@@ -218,6 +224,10 @@ const struct mp_cmd_def mp_cmds[] = {
                       {"reselect", 1})),
   }},
 
+  { MP_CMD_APPLY_PROFILE, "apply-profile", {ARG_STRING } },
+
+  { MP_CMD_LOAD_SCRIPT, "load-script", {ARG_STRING} },
+
   {0}
 };
 
@@ -249,7 +259,7 @@ static const struct legacy_cmd legacy_cmds[] = {
     {"saturation",              "add saturation"},
     {"hue",                     "add hue"},
     {"switch_vsync",            "cycle vsync"},
-    {"sub_load",                "sub_add"},
+    {"sub_load",                "sub-add"},
     {"sub_select",              "cycle sub"},
     {"sub_pos",                 "add sub-pos"},
     {"sub_delay",               "add sub-delay"},
@@ -275,7 +285,6 @@ static const struct legacy_cmd legacy_cmds[] = {
     {"show_tracks",             "show-text ${track-list}"},
     {"show_playlist",           "show-text ${playlist}"},
     {"speed_mult",              "multiply speed"},
-    {"dvdnav",                  "discnav"},
 
     // Approximate (can fail if user added additional whitespace)
     {"pt_step 1",               "playlist-next"},

@@ -2,18 +2,18 @@
  * This file is part of mpv video player.
  * Copyright © 2013 Alexander Preisinger <alexander.preisinger@gmail.com>
  *
- * mpv is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef MPLAYER_WAYLAND_COMMON_H
@@ -41,20 +41,24 @@ struct vo_wayland_output {
     uint32_t flags;
     int32_t width;
     int32_t height;
+    int32_t scale;
     int32_t refresh_rate; // fps (mHz)
     const char *make;
     const char *model;
     struct wl_list link;
 };
 
+typedef void (*vo_wayland_frame_cb)(void *data, uint32_t time);
 
 struct vo_wayland_state {
     struct vo *vo;
     struct mp_log* log;
+    int wakeup_pipe[2];
 
     struct {
+        void *data;
+        vo_wayland_frame_cb function;
         struct wl_callback *callback;
-        bool pending;
     } frame;
 
 #if HAVE_GL_WAYLAND
@@ -132,18 +136,16 @@ struct vo_wayland_state {
             struct xkb_keymap *keymap;
             struct xkb_state *state;
         } xkb;
-
-        struct wl_data_device_manager *devman;
-        struct wl_data_device *datadev;
-        struct wl_data_offer *offer;
-        int dnd_fd;
     } input;
 };
 
 int vo_wayland_init(struct vo *vo);
 void vo_wayland_uninit(struct vo *vo);
-bool vo_wayland_config(struct vo *vo, uint32_t flags);
+bool vo_wayland_config(struct vo *vo);
 int vo_wayland_control(struct vo *vo, int *events, int request, void *arg);
+void vo_wayland_wakeup(struct vo *vo);
+void vo_wayland_wait_events(struct vo *vo, int64_t until_time_us);
+void vo_wayland_request_frame(struct vo *vo, void *data, vo_wayland_frame_cb cb);
 
 #endif /* MPLAYER_WAYLAND_COMMON_H */
 

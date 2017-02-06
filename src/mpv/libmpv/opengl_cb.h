@@ -90,7 +90,7 @@ extern "C" {
  * The mpv_opengl_cb_* functions can be called from any thread, under the
  * following conditions:
  *  - only one of the mpv_opengl_cb_* functions can be called at the same time
- *    (unless they belong to different mpv_handles)
+ *    (unless they belong to different mpv cores created by mpv_create())
  *  - for functions which need an OpenGL context (see above) the OpenGL context
  *    must be "current" in the current thread, and it must be the same context
  *    as used with mpv_opengl_cb_init_gl()
@@ -107,6 +107,115 @@ extern "C" {
  * When the mpv core is destroyed (e.g. via mpv_terminate_destroy()), the OpenGL
  * context must have been uninitialized. If this doesn't happen, undefined
  * behavior will result.
+ *
+ * Hardware decoding
+ * -----------------
+ *
+ * Hardware decoding via opengl_cb is fully supported, but requires some
+ * additional setup. (At least if direct hardware decoding modes are wanted,
+ * instead of copying back surface data from GPU to CPU RAM.)
+ *
+ * While "normal" mpv loads the OpenGL hardware decoding interop on demand,
+ * this can't be done with opengl_cb for internal technical reasons. Instead,
+ * make it load the interop at load time by setting the
+ * "opengl-hwdec-interop"="auto" option before calling mpv_opengl_cb_init_gl()
+ * ("hwdec-preload" in older mpv releases).
+ *
+ * There may be certain requirements on the OpenGL implementation:
+ * - Windows: ANGLE is required (although in theory GL/DX interop could be used)
+ * - Intel/Linux: EGL is required, and also a glMPGetNativeDisplay() callback
+ *                must be provided (see sections below)
+ * - nVidia/Linux: GLX is required (if you force "cuda", it should work on EGL
+ *                 as well, if you have recent enough drivers and the
+ *                 "hwaccel" option is set to "cuda" as well)
+ * - OSX: CGL is required (CGLGetCurrentContext() returning non-NULL)
+ *
+ * Once these things are setup, hardware decoding can be enabled/disabled at
+ * any time by setting the "hwdec" property.
+ *
+ * Special windowing system interop considerations
+ * ------------------------------------------------
+ *
+ * In some cases, libmpv needs to have access to the windowing system's handles.
+ * This can be a pointer to a X11 "Display" for example. Usually this is needed
+ * only for hardware decoding.
+ *
+ * You can communicate these handles to libmpv by adding a pseudo-OpenGL
+ * extension "GL_MP_MPGetNativeDisplay" to the additional extension string when
+ * calling mpv_opengl_cb_init_gl(). The get_proc_address callback should resolve
+ * a function named "glMPGetNativeDisplay", which has the signature:
+ *
+ *    void* GLAPIENTRY glMPGetNativeDisplay(const char* name)
+ *
+ * See below what names are defined. Usually, libmpv will use the native handle
+ * up until mpv_opengl_cb_uninit_gl() is called. If the name is not anything
+ * you know/expected, return NULL from the function.
+ *
+ * Windowing system interop on Intel/Linux with VAAPI
+ * --------------------------------------------------
+ *
+ * The new VAAPI OpenGL interop requires an EGL context. EGL provides no way
+ * to query the X11 Display associated to a specific EGL context, so this API
+ * is used to pass it through.
+ *
+ * glMPGetNativeDisplay("x11") should return a X11 "Display*", which then will
+ * be used to create the hardware decoder state.
+ *
+ * glMPGetNativeDisplay("wl") should return a Wayland "struct wl_display *".
+ *
+ * glMPGetNativeDisplay("drm") should return a DRM FD casted to intptr_t (note
+ * that a 0 FD is not supported - if this can happen in your case, you must
+ * dup2() it to a non-0 FD).
+ *
+ * nVidia/Linux via VDPAU requires GLX, which does not have this problem (the
+ * GLX API can return the current X11 Display).
+ *
+ * Windowing system interop on MS win32
+ * ------------------------------------
+ *
+ * Warning: the following is only required if native OpenGL instead of ANGLE
+ *          is used. ANGLE is recommended, because it also allows direct
+ *          hardware decoding interop without further setup by the libmpv
+ *          API user, while the same with native OpenGL is either very hard
+ *          to do (via GL/DX interop with D3D9), or not implemented.
+ *
+ * If OpenGL switches to fullscreen, most players give it access GPU access,
+ * which means DXVA2 hardware decoding in mpv won't work. This can be worked
+ * around by giving mpv access to Direct3D device, which it will then use to
+ * create a decoder. The device can be either the real device used for display,
+ * or a "blank" device created before switching to fullscreen.
+ *
+ * You can provide glMPGetNativeDisplay as described in the previous section.
+ * If it is called with name set to "IDirect3DDevice9", it should return a
+ * IDirect3DDevice9 pointer (or NULL if not available). libmpv will release
+ * this interface when it is done with it.
+ *
+ * In previous libmpv releases, this used "GL_MP_D3D_interfaces" and
+ * "glMPGetD3DInterface". This is deprecated; use glMPGetNativeDisplay instead
+ * (the semantics are 100% compatible).
+ *
+ * Windowing system interop on RPI
+ * -------------------------------
+ *
+ * The RPI uses no proper interop, but hardware overlays instead. To place the
+ * overlay correctly, you can communicate the window parameters as follows to
+ * libmpv. gl->MPGetNativeDisplay("MPV_RPI_WINDOW") return an array of type int
+ * with the following 4 elements:
+ *      0: display number (default 0)
+ *      1: layer number of the GL layer - video will be placed in the layer
+ *         directly below (default: 0)
+ *      2: absolute x position of the GL context (default: 0)
+ *      3: absolute y position of the GL context (default: 0)
+ * The (x,y) position must be the absolute screen pixel position of the
+ * top/left pixel of the dispmanx layer used for the GL context. If you render
+ * to a FBO, the position must be that of the final position of the FBO
+ * contents on screen. You can't transform or scale the video other than what
+ * mpv will render to the video overlay. The defaults are suitable for
+ * rendering the video at fullscreen.
+ * The parameters are checked on every draw by calling MPGetNativeDisplay and
+ * checking the values in the returned array for changes. The returned array
+ * must remain valid until the libmpv render function returns; then it can be
+ * deallocated by the API user.
  */
 
 /**
@@ -196,7 +305,7 @@ int mpv_opengl_cb_init_gl(mpv_opengl_cb_context *ctx, const char *exts,
  * @param h Height of the framebuffer. Same as with the w parameter, except
  *          that this parameter can be negative. In this case, the video
  *          frame will be rendered flipped.
- * @return the number of left frames in the internal queue to be rendered
+ * @return 0
  */
 int mpv_opengl_cb_draw(mpv_opengl_cb_context *ctx, int fbo, int w, int h);
 
@@ -212,18 +321,19 @@ int mpv_opengl_cb_draw(mpv_opengl_cb_context *ctx, int fbo, int w, int h);
  * was never marked as stable).
  */
 int mpv_opengl_cb_render(mpv_opengl_cb_context *ctx, int fbo, int vp[4]);
-int mpv_opengl_cb_render_osd(struct mpv_opengl_cb_context *ctx,
-                             int w, int h, int ml, int mt, int mr, int mb, double dpar,
-                             void(*cb)(void*,struct sub_bitmaps*), void *octx);
 
 /**
  * Tell the renderer that a frame was flipped at the given time. This is
  * optional, but can help the player to achieve better timing.
  *
+ * Note that calling this at least once informs libmpv that you will use this
+ * function. If you use it inconsistently, expect bad video playback.
+ *
  * If this is called while no video or no OpenGL is initialized, it is ignored.
  *
  * @param time The mpv time (using mpv_get_time_us()) at which the flip call
  *             returned. If 0 is passed, mpv_get_time_us() is used instead.
+ *             Currently, this parameter is ignored.
  * @return error code
  */
 int mpv_opengl_cb_report_flip(mpv_opengl_cb_context *ctx, int64_t time);

@@ -275,7 +275,7 @@ static void enable_kx(bool enable)
     // shouldn't be relied on here either.
     if (isatty(STDOUT_FILENO)) {
         char *cmd = enable ? "\033=" : "\033>";
-        write(STDOUT_FILENO, cmd, strlen(cmd));
+        (void)write(STDOUT_FILENO, cmd, strlen(cmd));
     }
 }
 
@@ -378,7 +378,7 @@ static void quit_request_sighandler(int signum)
 {
     do_deactivate_getch2();
 
-    write(death_pipe[1], &(char){0}, 1);
+    (void)write(death_pipe[1], &(char){1}, 1);
 }
 
 static void *terminal_thread(void *ptr)
@@ -386,31 +386,32 @@ static void *terminal_thread(void *ptr)
     mpthread_set_name("terminal");
     bool stdin_ok = read_terminal; // if false, we still wait for SIGTERM
     while (1) {
+        getch2_poll();
         struct pollfd fds[2] = {
             {.events = POLLIN, .fd = death_pipe[0]},
             {.events = POLLIN, .fd = STDIN_FILENO},
         };
-        // Wait with some timeout, so we can call getch2_poll() frequently.
-        poll(fds, stdin_ok ? 2 : 1, 1000);
+        poll(fds, stdin_ok ? 2 : 1, -1);
         if (fds[0].revents)
             break;
         if (fds[1].revents)
             stdin_ok = getch2(input_ctx);
-        getch2_poll();
     }
+    char c;
+    bool quit = read(death_pipe[0], &c, 1) == 1 && c == 1;
     // Important if we received SIGTERM, rather than regular quit.
-    struct mp_cmd *cmd = mp_input_parse_cmd(input_ctx, bstr0("quit"), "");
-    if (cmd)
-        mp_input_queue_cmd(input_ctx, cmd);
+    if (quit) {
+        struct mp_cmd *cmd = mp_input_parse_cmd(input_ctx, bstr0("quit 4"), "");
+        if (cmd)
+            mp_input_queue_cmd(input_ctx, cmd);
+    }
     return NULL;
 }
 
 void terminal_setup_getch(struct input_ctx *ictx)
 {
-    if (!getch2_enabled)
+    if (!getch2_enabled || input_ctx)
         return;
-
-    assert(!input_ctx); // already setup
 
     if (mp_make_wakeup_pipe(death_pipe) < 0)
         return;
@@ -451,7 +452,7 @@ void terminal_uninit(void)
     do_deactivate_getch2();
 
     if (input_ctx) {
-        write(death_pipe[1], &(char){0}, 1);
+        (void)write(death_pipe[1], &(char){0}, 1);
         pthread_join(input_thread, NULL);
         close(death_pipe[0]);
         close(death_pipe[1]);

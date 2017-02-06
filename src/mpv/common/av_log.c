@@ -36,19 +36,16 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <libavfilter/avfilter.h>
 
 #if HAVE_LIBAVDEVICE
 #include <libavdevice/avdevice.h>
 #endif
 
-#if HAVE_LIBAVFILTER
-#include <libavfilter/avfilter.h>
-#endif
-
-#if HAVE_LIBAVRESAMPLE
+#if HAVE_IS_LIBAV
 #include <libavresample/avresample.h>
 #endif
-#if HAVE_LIBSWRESAMPLE
+#if HAVE_IS_FFMPEG
 #include <libswresample/swresample.h>
 #endif
 
@@ -134,11 +131,17 @@ static void mp_msg_av_log_callback(void *ptr, int level, const char *fmt,
     struct mp_log *log = get_av_log(ptr);
 
     if (mp_msg_test(log, mp_level)) {
-        if (log_print_prefix)
-            mp_msg(log, mp_level, "%s: ", avc ? avc->item_name(ptr) : "?");
+        char buffer[4096] = "";
+        int pos = 0;
+        const char *prefix = avc ? avc->item_name(ptr) : NULL;
+        if (log_print_prefix && prefix)
+            pos = snprintf(buffer, sizeof(buffer), "%s: ", prefix);
         log_print_prefix = fmt[strlen(fmt) - 1] == '\n';
 
-        mp_msg_va(log, mp_level, fmt, vl);
+        pos = MPMIN(MPMAX(pos, 0), sizeof(buffer));
+        vsnprintf(buffer + pos, sizeof(buffer) - pos, fmt, vl);
+
+        mp_msg(log, mp_level, "%s", buffer);
     }
 
     pthread_mutex_unlock(&log_lock);
@@ -160,10 +163,8 @@ void init_libav(struct mpv_global *global)
     avcodec_register_all();
     av_register_all();
     avformat_network_init();
-
-#if HAVE_LIBAVFILTER
     avfilter_register_all();
-#endif
+
 #if HAVE_LIBAVDEVICE
     avdevice_register_all();
 #endif
@@ -188,20 +189,18 @@ struct lib {
     unsigned runv;
 };
 
-void print_libav_versions(struct mp_log *log, int v)
+bool print_libav_versions(struct mp_log *log, int v)
 {
     const struct lib libs[] = {
         {"libavutil",     LIBAVUTIL_VERSION_INT,     avutil_version()},
         {"libavcodec",    LIBAVCODEC_VERSION_INT,    avcodec_version()},
         {"libavformat",   LIBAVFORMAT_VERSION_INT,   avformat_version()},
         {"libswscale",    LIBSWSCALE_VERSION_INT,    swscale_version()},
-#if HAVE_LIBAVFILTER
         {"libavfilter",   LIBAVFILTER_VERSION_INT,   avfilter_version()},
-#endif
-#if HAVE_LIBAVRESAMPLE
+#if HAVE_IS_LIBAV
         {"libavresample", LIBAVRESAMPLE_VERSION_INT, avresample_version()},
 #endif
-#if HAVE_LIBSWRESAMPLE
+#if HAVE_IS_FFMPEG
         {"libswresample", LIBSWRESAMPLE_VERSION_INT, swresample_version()},
 #endif
     };
@@ -209,35 +208,19 @@ void print_libav_versions(struct mp_log *log, int v)
     mp_msg(log, v, "%s library versions:\n", LIB_PREFIX);
 
     bool mismatch = false;
-    bool broken = false;
     for (int n = 0; n < MP_ARRAY_SIZE(libs); n++) {
         const struct lib *l = &libs[n];
         mp_msg(log, v, "   %-15s %d.%d.%d", l->name, V(l->buildv));
         if (l->buildv != l->runv) {
             mp_msg(log, v, " (runtime %d.%d.%d)", V(l->runv));
             mismatch = true;
-            broken |= ((l->buildv & 255) >= 100) != ((l->runv & 255) >= 100);
         }
         mp_msg(log, v, "\n");
     }
-    // This just won't work. It's 100% broken.
-    if (broken) {
-        mp_fatal(log, "mpv was compiled and linked against a mixture of Libav "
-                 "and FFmpeg versions. This won't work and will most likely "
-                 "crash at some point. Aborting.\n");
-        abort();
-    }
-    // We don't "really" support mismatched libraries, but if you like to
-    // suffer, you're free to enjoy the terrible aspects of dynamic linking.
-    // In particular, we don't use all these crazy accessors ffmpeg wants us
-    // to use in order to be ABI compatible after Libav merges - because that
-    // would make our code incompatible to Libav. It's madness.
-    if (mismatch) {
-        mp_warn(log, "Warning: mpv was compiled against a different version of "
-                "%s than the shared\nlibrary it is linked against. This can "
-                "expose subtle ABI compatibility issues\nand can lead to "
-                "misbehavior and crashes.\n", LIB_PREFIX);
-    }
+
+    mp_msg(log, v, "%s version: %s\n", LIB_PREFIX, av_version_info());
+
+    return !mismatch;
 }
 
 #undef V

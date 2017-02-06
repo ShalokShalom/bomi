@@ -31,65 +31,33 @@
 #include "af.h"
 
 // Static list of filters
-extern const struct af_info af_info_dummy;
-extern const struct af_info af_info_delay;
 extern const struct af_info af_info_channels;
 extern const struct af_info af_info_format;
-extern const struct af_info af_info_force;
 extern const struct af_info af_info_volume;
 extern const struct af_info af_info_equalizer;
 extern const struct af_info af_info_pan;
-extern const struct af_info af_info_surround;
-extern const struct af_info af_info_sub;
-extern const struct af_info af_info_export;
 extern const struct af_info af_info_drc;
-extern const struct af_info af_info_extrastereo;
 extern const struct af_info af_info_lavcac3enc;
 extern const struct af_info af_info_lavrresample;
-extern const struct af_info af_info_sweep;
-extern const struct af_info af_info_hrtf;
-extern const struct af_info af_info_ladspa;
-extern const struct af_info af_info_center;
-extern const struct af_info af_info_sinesuppress;
-extern const struct af_info af_info_karaoke;
 extern const struct af_info af_info_scaletempo;
 extern const struct af_info af_info_bs2b;
 extern const struct af_info af_info_lavfi;
 extern const struct af_info af_info_rubberband;
 
 static const struct af_info *const filter_list[] = {
-    &af_info_delay,
     &af_info_channels,
     &af_info_format,
     &af_info_volume,
     &af_info_equalizer,
     &af_info_pan,
-    &af_info_surround,
-    &af_info_sub,
-    &af_info_export,
     &af_info_drc,
-    &af_info_extrastereo,
     &af_info_lavcac3enc,
     &af_info_lavrresample,
-    &af_info_sweep,
-    &af_info_hrtf,
-#if HAVE_LADSPA
-    &af_info_ladspa,
-#endif
 #if HAVE_RUBBERBAND
     &af_info_rubberband,
 #endif
-    &af_info_center,
-    &af_info_sinesuppress,
-    &af_info_karaoke,
     &af_info_scaletempo,
-#if HAVE_LIBBS2B
-    &af_info_bs2b,
-#endif
-#if HAVE_LIBAVFILTER
     &af_info_lavfi,
-#endif
-    &af_info_dummy,
     NULL
 };
 
@@ -187,33 +155,21 @@ static struct af_instance *af_create(struct af_stream *s, char *name,
         MP_ERR(s, "Couldn't find audio filter '%s'.\n", name);
         return NULL;
     }
-    const struct af_info *info = desc.p;
-    /* Make sure that the filter is not already in the list if it is
-       non-reentrant */
-    if (info->flags & AF_FLAGS_NOT_REENTRANT) {
-        for (struct af_instance *cur = s->first; cur; cur = cur->next) {
-            if (cur->info == info) {
-                MP_ERR(s, "There can only be one "
-                       "instance of the filter '%s' in each stream\n", name);
-                return NULL;
-            }
-        }
-    }
-
     MP_VERBOSE(s, "Adding filter %s \n", name);
 
     struct af_instance *af = talloc_zero(NULL, struct af_instance);
     *af = (struct af_instance) {
-        .info = info,
+        .info = desc.p,
         .data = talloc_zero(af, struct mp_audio),
         .log = mp_log_new(af, s->log, name),
+        .opts = s->opts,
         .replaygain_data = s->replaygain_data,
         .out_pool = mp_audio_pool_create(af),
     };
-    struct m_config *config = m_config_from_obj_desc(af, s->log, &desc);
-    if (m_config_apply_defaults(config, name, s->opts->af_defs) < 0)
-        goto error;
-    if (m_config_set_obj_params(config, args) < 0)
+    struct m_config *config =
+        m_config_from_obj_desc_and_args(af, s->log, NULL, &desc,
+                                        name, s->opts->af_defs, args);
+    if (!config)
         goto error;
     af->priv = config->optstruct;
 
@@ -249,29 +205,6 @@ static struct af_instance *af_prepend(struct af_stream *s,
     new->prev = af->prev;
     af->prev = new;
     new->prev->next = new;
-    return new;
-}
-
-/* Create and insert a new filter of type name after the filter in the
-   argument. This function can be called during runtime, the return
-   value is the new filter */
-static struct af_instance *af_append(struct af_stream *s,
-                                     struct af_instance *af,
-                                     char *name, char **args)
-{
-    if (!af)
-        af = s->first;
-    if (af == s->last)
-        af = s->last->prev;
-    // Create the new filter and make sure it is OK
-    struct af_instance *new = af_create(s, name, args);
-    if (!new)
-        return NULL;
-    // Update pointers
-    new->prev = af;
-    new->next = af->next;
-    af->next = new;
-    new->next->prev = new;
     return new;
 }
 
@@ -317,8 +250,12 @@ static void af_print_filter_chain(struct af_stream *s, struct af_instance *at,
     while (af) {
         char b[128] = {0};
         mp_snprintf_cat(b, sizeof(b), "  [%s] ", af->info->name);
+        if (af->label)
+            mp_snprintf_cat(b, sizeof(b), "\"%s\" ", af->label);
         if (af->data)
             mp_snprintf_cat(b, sizeof(b), "%s", mp_audio_config_to_str(af->data));
+        if (af->auto_inserted)
+            mp_snprintf_cat(b, sizeof(b), " [a]");
         if (af == at)
             mp_snprintf_cat(b, sizeof(b), " <-");
         MP_MSG(s, msg_level, "%s\n", b);
@@ -329,167 +266,159 @@ static void af_print_filter_chain(struct af_stream *s, struct af_instance *at,
     MP_MSG(s, msg_level, "  [ao] %s\n", mp_audio_config_to_str(&s->output));
 }
 
-static bool af_is_conversion_filter(struct af_instance *af)
-{
-    return af && strcmp(af->info->name, "lavrresample") == 0;
-}
-
-// in is what af can take as input - insert a conversion filter if the actual
-// input format doesn't match what af expects.
-// Returns:
-//   AF_OK: must call af_reinit() or equivalent, format matches (or is closer)
-//   AF_FALSE: nothing was changed, format matches
-//   else: error
-static int af_fix_format_conversion(struct af_stream *s,
-                                    struct af_instance **p_af,
-                                    struct mp_audio in)
-{
-    int rv;
-    struct af_instance *af = *p_af;
-    struct af_instance *prev = af->prev;
-    struct mp_audio actual = *prev->data;
-    if (actual.format == in.format)
-        return AF_FALSE;
-    int dstfmt = in.format;
-    char *filter = "lavrresample";
-    if (strcmp(filter, prev->info->name) == 0) {
-        if (prev->control(prev, AF_CONTROL_SET_FORMAT, &dstfmt) == AF_OK) {
-            *p_af = prev;
-            return AF_OK;
-        }
-    }
-    struct af_instance *new = af_prepend(s, af, filter, NULL);
-    if (new == NULL)
-        return AF_ERROR;
-    new->auto_inserted = true;
-    if (AF_OK != (rv = new->control(new, AF_CONTROL_SET_FORMAT, &dstfmt)))
-        return rv;
-    *p_af = new;
-    return AF_OK;
-}
-
-// same as af_fix_format_conversion - only wrt. channels
-static int af_fix_channels(struct af_stream *s, struct af_instance **p_af,
-                           struct mp_audio in)
-{
-    int rv;
-    struct af_instance *af = *p_af;
-    struct af_instance *prev = af->prev;
-    struct mp_audio actual = *prev->data;
-    if (mp_chmap_equals(&actual.channels, &in.channels))
-        return AF_FALSE;
-    if (prev->control(prev, AF_CONTROL_SET_CHANNELS, &in.channels) == AF_OK) {
-        *p_af = prev;
-        return AF_OK;
-    }
-    char *filter = "lavrresample";
-    struct af_instance *new = af_prepend(s, af, filter, NULL);
-    if (new == NULL)
-        return AF_ERROR;
-    new->auto_inserted = true;
-    if (AF_OK != (rv = new->control(new, AF_CONTROL_SET_CHANNELS, &in.channels)))
-        return rv;
-    *p_af = new;
-    return AF_OK;
-}
-
-static int af_fix_rate(struct af_stream *s, struct af_instance **p_af,
-                       struct mp_audio in)
-{
-    int rv;
-    struct af_instance *af = *p_af;
-    struct af_instance *prev = af->prev;
-    struct mp_audio actual = *prev->data;
-    if (actual.rate == in.rate)
-        return AF_FALSE;
-    if (prev->control(prev, AF_CONTROL_SET_RESAMPLE_RATE, &in.rate) == AF_OK) {
-        *p_af = prev;
-        return AF_OK;
-    }
-    char *filter = "lavrresample";
-    struct af_instance *new = af_prepend(s, af, filter, NULL);
-    if (new == NULL)
-        return AF_ERROR;
-    new->auto_inserted = true;
-    if (AF_OK != (rv = new->control(new, AF_CONTROL_SET_RESAMPLE_RATE, &in.rate)))
-        return rv;
-    *p_af = new;
-    return AF_OK;
-}
-
 static void reset_formats(struct af_stream *s)
 {
+    struct mp_audio none = {0};
     for (struct af_instance *af = s->first; af; af = af->next) {
-        af->control(af, AF_CONTROL_SET_RESAMPLE_RATE, &(int){0});
-        af->control(af, AF_CONTROL_SET_CHANNELS, &(struct mp_chmap){0});
-        af->control(af, AF_CONTROL_SET_FORMAT, &(int){0});
+        if (af != s->first && af != s->last)
+            mp_audio_copy_config(af->data, &none);
     }
+}
+
+static int filter_reinit(struct af_instance *af)
+{
+    struct af_instance *prev = af->prev;
+    assert(prev);
+
+    // Check if this is the first filter
+    struct mp_audio in = *prev->data;
+    // Reset just in case...
+    mp_audio_set_null_data(&in);
+
+    if (!mp_audio_config_valid(&in))
+        return AF_ERROR;
+
+    af->fmt_in = in;
+    int rv = af->control(af, AF_CONTROL_REINIT, &in);
+    if (rv == AF_OK && !mp_audio_config_equals(&in, prev->data))
+        rv = AF_FALSE; // conversion filter needed
+    if (rv == AF_FALSE)
+        af->fmt_in = in;
+
+    if (rv == AF_OK) {
+        if (!mp_audio_config_valid(af->data))
+            return AF_ERROR;
+        af->fmt_out = *af->data;
+    }
+
+    return rv;
+}
+
+static int filter_reinit_with_conversion(struct af_stream *s, struct af_instance *af)
+{
+    int rv = filter_reinit(af);
+
+    // Conversion filter is needed
+    if (rv == AF_FALSE) {
+        // First try if we can change the output format of the previous
+        // filter to the input format the current filter is expecting.
+        struct mp_audio in = af->fmt_in;
+        if (af->prev != s->first && !mp_audio_config_equals(af->prev->data, &in)) {
+            // This should have been successful (because it succeeded
+            // before), even if just reverting to the old output format.
+            mp_audio_copy_config(af->prev->data, &in);
+            rv = filter_reinit(af->prev);
+            if (rv != AF_OK)
+                return rv;
+        }
+        if (!mp_audio_config_equals(af->prev->data, &in)) {
+            // Retry with conversion filter added.
+            struct af_instance *new =
+                af_prepend(s, af, "lavrresample", NULL);
+            if (!new)
+                return AF_ERROR;
+            new->auto_inserted = true;
+            mp_audio_copy_config(new->data, &in);
+            rv = filter_reinit(new);
+            if (rv != AF_OK)
+                af_remove(s, new);
+        }
+        if (rv == AF_OK)
+            rv = filter_reinit(af);
+    }
+
+    return rv;
+}
+
+static int af_find_output_conversion(struct af_stream *s, struct mp_audio *cfg)
+{
+    assert(mp_audio_config_valid(&s->output));
+    assert(s->initialized > 0);
+
+    if (mp_chmap_equals_reordered(&s->input.channels, &s->output.channels))
+        return AF_ERROR;
+
+    // Heuristic to detect point of conversion. If it looks like something
+    // more complicated is going on, better bail out.
+    // We expect that the last filter converts channels.
+    struct af_instance *conv = s->last->prev;
+    if (!conv->auto_inserted)
+        return AF_ERROR;
+    if (!(mp_chmap_equals_reordered(&conv->fmt_in.channels, &s->input.channels) &&
+          mp_chmap_equals_reordered(&conv->fmt_out.channels, &s->output.channels)))
+        return AF_ERROR;
+    // Also, should be the only one which does auto conversion.
+    for (struct af_instance *af = s->first->next; af != s->last; af = af->next)
+    {
+        if (af != conv && af->auto_inserted &&
+            !mp_chmap_equals_reordered(&af->fmt_in.channels, &af->fmt_out.channels))
+            return AF_ERROR;
+    }
+    // And not if it's the only filter.
+    if (conv->prev == s->first && conv->next == s->last)
+        return AF_ERROR;
+
+    *cfg = s->output;
+    return AF_OK;
 }
 
 // Return AF_OK on success or AF_ERROR on failure.
-// Warning:
-// A failed af_reinit() leaves the audio chain behind in a useless, broken
-// state (for example, format filters that were tentatively inserted stay
-// inserted).
-// In that case, you should always rebuild the filter chain, or abort.
-static int af_reinit(struct af_stream *s)
+static int af_do_reinit(struct af_stream *s, bool second_pass)
 {
+    struct mp_audio convert_early = {0};
+    if (second_pass) {
+        // If a channel conversion happens, and it is done by an auto-inserted
+        // filter, then insert a filter to convert it early. Otherwise, do
+        // nothing and return immediately.
+        if (af_find_output_conversion(s, &convert_early) != AF_OK)
+            return AF_OK;
+    }
+
     remove_auto_inserted_filters(s);
     af_chain_forget_frames(s);
     reset_formats(s);
     s->first->fmt_in = s->first->fmt_out = s->input;
+
+    if (mp_audio_config_valid(&convert_early)) {
+        struct af_instance *new = af_prepend(s, s->first, "lavrresample", NULL);
+        if (!new)
+            return AF_ERROR;
+        new->auto_inserted = true;
+        mp_audio_copy_config(new->data, &convert_early);
+        int rv = filter_reinit(new);
+        if (rv != AF_DETACH && rv != AF_OK)
+            return AF_ERROR;
+        MP_VERBOSE(s, "Moving up output conversion.\n");
+    }
+
     // Start with the second filter, as the first filter is the special input
     // filter which needs no initialization.
     struct af_instance *af = s->first->next;
-    // Up to 4 retries per filter (channel, rate, format conversions)
-    int max_retry = 4;
-    int retry = 0;
     while (af) {
-        if (retry >= max_retry)
-            goto negotiate_error;
+        int rv = filter_reinit_with_conversion(s, af);
 
-        // Check if this is the first filter
-        struct mp_audio in = *af->prev->data;
-        // Reset just in case...
-        mp_audio_set_null_data(&in);
-
-        if (!mp_audio_config_valid(&in))
-            goto error;
-
-        af->fmt_in = in;
-        int rv = af->control(af, AF_CONTROL_REINIT, &in);
-        if (rv == AF_OK && !mp_audio_config_equals(&in, af->prev->data))
-            rv = AF_FALSE; // conversion filter needed
         switch (rv) {
         case AF_OK:
-            if (!mp_audio_config_valid(af->data))
-                goto error;
-            af->fmt_out = *af->data;
             af = af->next;
             break;
-        case AF_FALSE: { // Configuration filter is needed
-            if (af_fix_channels(s, &af, in) == AF_OK) {
-                retry++;
-                continue;
-            }
-            if (af_fix_rate(s, &af, in) == AF_OK) {
-                retry++;
-                continue;
-            }
-            // Do this last, to prevent "format->lavrresample" being added to
-            // the filter chain when output formats not supported by
-            // af_lavrresample are in use.
-            if (af_fix_format_conversion(s, &af, in) == AF_OK) {
-                retry++;
-                continue;
-            }
+        case AF_FALSE: {
             // If the format conversion is (probably) caused by spdif, then
             // (as a feature) drop the filter, instead of failing hard.
             int fmt_in1 = af->prev->data->format;
-            int fmt_in2 = in.format;
+            int fmt_in2 = af->fmt_in.format;
             if (af_fmt_is_valid(fmt_in1) && af_fmt_is_valid(fmt_in2)) {
-                bool spd1 = AF_FORMAT_IS_IEC61937(fmt_in1);
-                bool spd2 = AF_FORMAT_IS_IEC61937(fmt_in2);
+                bool spd1 = af_fmt_is_spdif(fmt_in1);
+                bool spd2 = af_fmt_is_spdif(fmt_in2);
                 if (spd1 != spd2 && af->next) {
                     MP_WARN(af, "Filter %s apparently cannot be used due to "
                                 "spdif passthrough - removing it.\n",
@@ -497,7 +426,7 @@ static int af_reinit(struct af_stream *s)
                     struct af_instance *aft = af->prev;
                     af_remove(s, af);
                     af = aft->next;
-                    break;
+                    continue;
                 }
             }
             goto negotiate_error;
@@ -535,6 +464,19 @@ error:
     s->initialized = -1;
     af_print_filter_chain(s, af, MSGL_ERR);
     return AF_ERROR;
+}
+
+static int af_reinit(struct af_stream *s)
+{
+    int r = af_do_reinit(s, false);
+    if (r == AF_OK && mp_audio_config_valid(&s->output)) {
+        r = af_do_reinit(s, true);
+        if (r != AF_OK) {
+            MP_ERR(s, "Failed second pass filter negotiation.\n");
+            r = af_do_reinit(s, false);
+        }
+    }
+    return r;
 }
 
 // Uninit and remove all filters
@@ -591,7 +533,7 @@ void af_destroy(struct af_stream *s)
    format of the preferred output respectively. The function is
    reentrant i.e. if called with an already initialized stream the
    stream will be reinitialized.
-   If one of the prefered output parameters is 0 the one that needs
+   If one of the preferred output parameters is 0 the one that needs
    no conversion is used (i.e. the output format in the last filter).
    The return value is 0 if success and -1 if failure */
 int af_init(struct af_stream *s)
@@ -636,17 +578,12 @@ struct af_instance *af_add(struct af_stream *s, char *name, char *label,
     if (af_find_by_label(s, label))
         return NULL;
 
-    struct af_instance *new;
-    // Insert the filter somewhere nice
-    if (af_is_conversion_filter(s->first->next))
-        new = af_append(s, s->first->next, name, args);
-    else
-        new = af_prepend(s, s->first->next, name, args);
+    struct af_instance *new = af_prepend(s, s->last, name, args);
     if (!new)
         return NULL;
     new->label = talloc_strdup(new, label);
 
-    // Reinitalize the filter list
+    // Reinitialize the filter list
     if (af_reinit(s) != AF_OK) {
         af_remove_by_label(s, label);
         return NULL;
@@ -714,6 +651,29 @@ void af_control_all(struct af_stream *s, int cmd, void *arg)
 {
     for (struct af_instance *af = s->first; af; af = af->next)
         af->control(af, cmd, arg);
+}
+
+int af_control_by_label(struct af_stream *s, int cmd, void *arg, bstr label)
+{
+    char *label_str = bstrdup0(NULL, label);
+    struct af_instance *cur = af_find_by_label(s, label_str);
+    talloc_free(label_str);
+    if (cur) {
+        return cur->control ? cur->control(cur, cmd, arg) : CONTROL_NA;
+    } else {
+        return CONTROL_UNKNOWN;
+    }
+}
+
+int af_send_command(struct af_stream *s, char *label, char *cmd, char *arg)
+{
+    char *args[2] = {cmd, arg};
+    if (strcmp(label, "all") == 0) {
+        af_control_all(s, AF_CONTROL_COMMAND, args);
+        return 0;
+    } else {
+        return af_control_by_label(s, AF_CONTROL_COMMAND, args, bstr0(label));
+    }
 }
 
 // Used by filters to add a filtered frame to the output queue.
@@ -817,6 +777,12 @@ struct mp_audio *af_read_output_frame(struct af_stream *s)
     if (!s->last->num_out_queued)
         af_output_frame(s, false);
     return af_dequeue_output_frame(s->last);
+}
+
+void af_unread_output_frame(struct af_stream *s, struct mp_audio *frame)
+{
+    struct af_instance *af = s->last;
+    MP_TARRAY_INSERT_AT(af, af->out_queued, af->num_out_queued, 0, frame);
 }
 
 // Make sure the caller can change data referenced by the frame.

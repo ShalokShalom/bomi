@@ -33,26 +33,17 @@
 #define MP_IMGFIELD_TOP_FIRST 0x02
 #define MP_IMGFIELD_REPEAT_FIRST 0x04
 #define MP_IMGFIELD_INTERLACED 0x20
-#define MP_IMGFIELD_ADDITIONAL 0x100
-#define MP_IMGFIELD_TOP 0x200
-#define MP_IMGFIELD_BOTTOM 0x400
 
 // Describes image parameters that usually stay constant.
 // New fields can be added in the future. Code changing the parameters should
 // usually copy the whole struct, so that fields added later will be preserved.
 struct mp_image_params {
     enum mp_imgfmt imgfmt;      // pixel format
+    enum mp_imgfmt hw_subfmt;   // underlying format for some hwaccel pixfmts
     int w, h;                   // image dimensions
-    int d_w, d_h;               // define display aspect ratio (never 0/0)
-    enum mp_csp colorspace;
-    enum mp_csp_levels colorlevels;
-    enum mp_csp_prim primaries;
-    enum mp_csp_trc gamma;
+    int p_w, p_h;               // define pixel aspect ratio (undefined: 0/0)
+    struct mp_colorspace color;
     enum mp_chroma_location chroma_location;
-    // The image should be converted to these levels. Unlike colorlevels, it
-    // does not describe the current state of the image. (Somewhat similar to
-    // d_w/d_h vs. w/h.)
-    enum mp_csp_levels outputlevels;
     // The image should be rotated clockwise (0-359 degrees).
     int rotate;
     enum mp_stereo3d_mode stereo_in;    // image is encoded with this mode
@@ -93,19 +84,27 @@ typedef struct mp_image {
 
     /* only inside filter chain */
     double pts;
-
-    int hwdec_type;
-
-    /* memory management */
-    struct m_refcount *refcount;
+    /* only after decoder */
+    double dts, pkt_duration;
     /* for private use */
     void* priv;
+
+    // Reference-counted data references.
+    // These do not necessarily map directly to planes[]. They can have
+    // different order or count. There shouldn't be more buffers than planes.
+    // If bufs[n] is NULL, bufs[n+1] must also be NULL.
+    // All mp_* functions manage this automatically; do not mess with it.
+    // (See also AVFrame.buf.)
+    struct AVBufferRef *bufs[MP_MAX_PLANES];
+    // Points to AVHWFramesContext* (same as AVFrame.hw_frames_ctx)
+    struct AVBufferRef *hwctx;
 } mp_image_t;
 
 int mp_chroma_div_up(int size, int shift);
 
 struct mp_image *mp_image_alloc(int fmt, int w, int h);
 void mp_image_copy(struct mp_image *dmpi, struct mp_image *mpi);
+void mp_image_copy_gpu(struct mp_image *dst, struct mp_image *src);
 void mp_image_copy_attributes(struct mp_image *dmpi, struct mp_image *mpi);
 struct mp_image *mp_image_new_copy(struct mp_image *img);
 struct mp_image *mp_image_new_ref(struct mp_image *img);
@@ -126,6 +125,7 @@ int mp_image_plane_h(struct mp_image *mpi, int plane);
 void mp_image_setfmt(mp_image_t* mpi, int out_fmt);
 void mp_image_steal_data(struct mp_image *dst, struct mp_image *src);
 
+struct mp_image *mp_image_new_dummy_ref(struct mp_image *img);
 struct mp_image *mp_image_new_custom_ref(struct mp_image *img, void *arg,
                                          void (*free)(void *arg));
 
@@ -133,11 +133,15 @@ void mp_image_params_guess_csp(struct mp_image_params *params);
 
 char *mp_image_params_to_str_buf(char *b, size_t bs,
                                  const struct mp_image_params *p);
-#define mp_image_params_to_str(p) mp_image_params_to_str_buf((char[80]){0}, 80, p)
+#define mp_image_params_to_str(p) mp_image_params_to_str_buf((char[99]){0}, 99, p)
 
 bool mp_image_params_valid(const struct mp_image_params *p);
 bool mp_image_params_equal(const struct mp_image_params *p1,
                            const struct mp_image_params *p2);
+
+void mp_image_params_get_dsize(const struct mp_image_params *p,
+                               int *d_w, int *d_h);
+void mp_image_params_set_dsize(struct mp_image_params *p, int d_w, int d_h);
 
 void mp_image_set_params(struct mp_image *image,
                          const struct mp_image_params *params);
@@ -146,16 +150,15 @@ void mp_image_set_attributes(struct mp_image *image,
                              const struct mp_image_params *params);
 
 struct AVFrame;
-void mp_image_copy_fields_from_av_frame(struct mp_image *dst,
-                                        struct AVFrame *src);
-void mp_image_copy_fields_to_av_frame(struct AVFrame *dst,
-                                      struct mp_image *src);
 struct mp_image *mp_image_from_av_frame(struct AVFrame *av_frame);
+struct AVFrame *mp_image_to_av_frame(struct mp_image *img);
 struct AVFrame *mp_image_to_av_frame_and_unref(struct mp_image *img);
 
 void memcpy_pic(void *dst, const void *src, int bytesPerLine, int height,
                 int dstStride, int srcStride);
 void memset_pic(void *dst, int fill, int bytesPerLine, int height, int stride);
 void memset16_pic(void *dst, int fill, int unitsPerLine, int height, int stride);
+
+void mp_check_gpu_memcpy(struct mp_log *log, bool *once);
 
 #endif /* MPLAYER_MP_IMAGE_H */

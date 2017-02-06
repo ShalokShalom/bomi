@@ -27,7 +27,7 @@
 
 #include <libavutil/common.h>
 
-#include "talloc.h"
+#include "mpv_talloc.h"
 
 #include "options/m_option.h"
 #include "audio/format.h"
@@ -73,7 +73,7 @@ static void fput32le(uint32_t val, FILE *fp)
 static void write_wave_header(struct ao *ao, FILE *fp, uint64_t data_length)
 {
     uint16_t fmt = ao->format == AF_FORMAT_FLOAT ? WAV_ID_FLOAT_PCM : WAV_ID_PCM;
-    int bits = af_fmt2bits(ao->format);
+    int bits = af_fmt_to_bytes(ao->format) * 8;
 
     // Master RIFF chunk
     fput32le(WAV_ID_RIFF, fp);
@@ -135,7 +135,7 @@ static int init(struct ao *ao)
         case AF_FORMAT_FLOAT:
              break;
         default:
-            if (!AF_FORMAT_IS_IEC61937(ao->format))
+            if (!af_fmt_is_spdif(ao->format))
                 ao->format = AF_FORMAT_S16;
             break;
         }
@@ -146,14 +146,12 @@ static int init(struct ao *ao)
     if (!ao_chmap_sel_adjust(ao, &sel, &ao->channels))
         return -1;
 
-    ao->bps = ao->channels.num * ao->samplerate * af_fmt2bps(ao->format);
+    ao->bps = ao->channels.num * ao->samplerate * af_fmt_to_bytes(ao->format);
 
     MP_INFO(ao, "File: %s (%s)\nPCM: Samplerate: %d Hz Channels: %d Format: %s\n",
             priv->outputfilename,
             priv->waveheader ? "WAVE" : "RAW PCM", ao->samplerate,
             ao->channels.num, af_fmt_to_str(ao->format));
-    MP_INFO(ao, "Info: Faster dumping is achieved with --no-video\n");
-    MP_INFO(ao, "Info: To write WAVE files use --ao=pcm:waveheader (default).\n");
 
     priv->fp = fopen(priv->outputfilename, priv->append ? "ab" : "wb");
     if (!priv->fp) {
@@ -226,4 +224,5 @@ const struct ao_driver audio_out_pcm = {
         OPT_FLAG("append", append, 0),
         {0}
     },
+    .options_prefix = "ao-pcm",
 };
