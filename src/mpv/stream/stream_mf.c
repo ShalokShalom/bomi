@@ -30,6 +30,7 @@
 static int
 mf_stream_open (stream_t *stream)
 {
+  stream->type = STREAMTYPE_MF;
   stream->demuxer = "mf";
   stream->allow_caching = false;
 

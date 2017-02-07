@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -93,7 +93,7 @@ static const char *const std_layout_names[][2] = {
     {"7.1(alsa)",       "fl-fr-bl-br-fc-lfe-sl-sr"}, // not in lavc
     {"7.1(wide)",       "fl-fr-fc-lfe-bl-br-flc-frc"},
     {"7.1(wide-side)",  "fl-fr-fc-lfe-flc-frc-sl-sr"},
-    {"7.1(rear)",       "fl-fr-fc-lfe-bl-br-sdl-sdr"}, // not in lavc
+    {"7.1(rear)",       "fl-fr-fc-lfe-bl-br-sdl-sdr"},
     {"octagonal",       "fl-fr-fc-bl-br-bc-sl-sr"},
     {"downmix",         "dl-dr"},
     {"auto",            ""}, // not in lavc
@@ -110,6 +110,19 @@ static const struct mp_chmap default_layouts[] = {
     MP_CHMAP6(FL, FR, FC, LFE, BL, BR),         // 5.1
     MP_CHMAP7(FL, FR, FC, LFE, BC, SL, SR),     // 6.1
     MP_CHMAP8(FL, FR, FC, LFE, BL, BR, SL, SR), // 7.1
+};
+
+// The channel order was lavc/waveex, but differs from lavc for 5, 6 and 8
+// channels. 3 and 7 channels were likely undefined (no ALSA support).
+// I'm not sure about the 4 channel case: ALSA uses "quad", while the ffmpeg
+// default layout is "4.0".
+static const char *const mplayer_layouts[MP_NUM_CHANNELS + 1] = {
+    [1] = "mono",
+    [2] = "stereo",
+    [4] = "quad",
+    [5] = "5.0(alsa)",
+    [6] = "5.1(alsa)",
+    [8] = "7.1(alsa)",
 };
 
 // Returns true if speakers are mapped uniquely, and there's at least 1 channel.
@@ -214,6 +227,19 @@ void mp_chmap_from_channels(struct mp_chmap *dst, int num_channels)
         mp_chmap_set_unknown(dst, num_channels);
 }
 
+// Try to do what mplayer/mplayer2/mpv did before channel layouts were
+// introduced, i.e. get the old default channel order.
+void mp_chmap_from_channels_alsa(struct mp_chmap *dst, int num_channels)
+{
+    if (num_channels < 0 || num_channels > MP_NUM_CHANNELS) {
+        *dst = (struct mp_chmap) {0};
+    } else {
+        mp_chmap_from_str(dst, bstr0(mplayer_layouts[num_channels]));
+        if (!dst->num)
+            mp_chmap_from_channels(dst, num_channels);
+    }
+}
+
 // Set *dst to an unknown layout for the given numbers of channels.
 // If the number of channels is invalid, an invalid map is set, and
 // mp_chmap_is_valid(dst) will return false.
@@ -230,22 +256,54 @@ void mp_chmap_set_unknown(struct mp_chmap *dst, int num_channels)
     }
 }
 
+// Return channel index of the given speaker, or -1.
+static int mp_chmap_find_speaker(const struct mp_chmap *map, int speaker)
+{
+    for (int n = 0; n < map->num; n++) {
+        if (map->speaker[n] == speaker)
+            return n;
+    }
+    return -1;
+}
+
+static void mp_chmap_remove_speaker(struct mp_chmap *map, int speaker)
+{
+    int index = mp_chmap_find_speaker(map, speaker);
+    if (index >= 0) {
+        for (int n = index; n < map->num - 1; n++)
+            map->speaker[n] = map->speaker[n + 1];
+        map->num--;
+    }
+}
+
+// Some decoders output additional, redundant channels, which are usually
+// useless and will mess up proper audio output channel handling.
+// map: channel map from which the channels should be removed
+// requested: if not NULL, and if it contains any of the "useless" channels,
+//            don't remove them (this is for convenience)
+void mp_chmap_remove_useless_channels(struct mp_chmap *map,
+                                      const struct mp_chmap *requested)
+{
+    if (requested &&
+        mp_chmap_find_speaker(requested, MP_SPEAKER_ID_DL) >= 0)
+        return;
+
+    if (map->num > 2) {
+        mp_chmap_remove_speaker(map, MP_SPEAKER_ID_DL);
+        mp_chmap_remove_speaker(map, MP_SPEAKER_ID_DR);
+    }
+}
+
 // Return the ffmpeg/libav channel layout as in <libavutil/channel_layout.h>.
 // Speakers not representable by ffmpeg/libav are dropped.
 // Warning: this ignores the order of the channels, and will return a channel
 //          mask even if the order is different from libavcodec's.
-//          Also, "unknown" channel maps are translated to non-sense channel
-//          maps with the same number of channels.
 uint64_t mp_chmap_to_lavc_unchecked(const struct mp_chmap *src)
 {
+    // lavc has no concept for unknown layouts yet, so pick a default
     struct mp_chmap t = *src;
-    if (t.num > 64)
-        return 0;
-    // lavc has no concept for unknown layouts yet, so pick something that does
-    // the job of signaling the number of channels, even if it makes no sense
-    // as a proper layout.
     if (mp_chmap_is_unknown(&t))
-        return t.num == 64 ? (uint64_t)-1 : (1ULL << t.num) - 1;
+        mp_chmap_from_channels(&t, t.num);
     uint64_t mask = 0;
     for (int n = 0; n < t.num; n++) {
         if (t.speaker[n] < 64) // ignore MP_SPEAKER_ID_NA etc.
@@ -301,8 +359,6 @@ bool mp_chmap_is_lavc(const struct mp_chmap *src)
     return true;
 }
 
-// Warning: for "unknown" channel maps, this returns something that may not
-//          make sense. Invalid channel maps are not changed.
 void mp_chmap_reorder_to_lavc(struct mp_chmap *map)
 {
     if (!mp_chmap_is_valid(map))

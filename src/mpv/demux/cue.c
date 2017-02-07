@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -20,11 +20,10 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "misc/bstr.h"
 #include "common/common.h"
-#include "common/tags.h"
 
 #include "cue.h"
 
@@ -38,7 +37,6 @@ enum cue_command {
     CUE_TRACK,
     CUE_INDEX,
     CUE_TITLE,
-    CUE_PERFORMER,
 };
 
 static const struct {
@@ -53,7 +51,7 @@ static const struct {
     { CUE_UNUSED, "CDTEXTFILE" },
     { CUE_UNUSED, "FLAGS" },
     { CUE_UNUSED, "ISRC" },
-    { CUE_PERFORMER, "PERFORMER" },
+    { CUE_UNUSED, "PERFORMER" },
     { CUE_UNUSED, "POSTGAP" },
     { CUE_UNUSED, "PREGAP" },
     { CUE_UNUSED, "REM" },
@@ -70,7 +68,7 @@ static enum cue_command read_cmd(struct bstr *data, struct bstr *out_params)
         return CUE_EMPTY;
     for (int n = 0; cue_command_strings[n].command != -1; n++) {
         struct bstr name = bstr0(cue_command_strings[n].text);
-        if (bstr_case_startswith(line, name)) {
+        if (bstr_startswith(line, name)) {
             struct bstr rest = bstr_cut(line, name.len);
             if (rest.len && !strchr(WHITESPACE, rest.start[0]))
                 continue;
@@ -162,19 +160,17 @@ bool mp_probe_cue(struct bstr data)
 struct cue_file *mp_parse_cue(struct bstr data)
 {
     struct cue_file *f = talloc_zero(NULL, struct cue_file);
-    f->tags = talloc_zero(f, struct mp_tags);
 
     data = skip_utf8_bom(data);
 
     char *filename = NULL;
     // Global metadata, and copied into new tracks.
     struct cue_track proto_track = {0};
-    struct cue_track *cur_track = NULL;
+    struct cue_track *cur_track = &proto_track;
 
     while (data.len) {
         struct bstr param;
-        int cmd = read_cmd(&data, &param);
-        switch (cmd) {
+        switch (read_cmd(&data, &param)) {
         case CUE_ERROR:
             talloc_free(f);
             return NULL;
@@ -183,29 +179,19 @@ struct cue_file *mp_parse_cue(struct bstr data)
             f->num_tracks += 1;
             cur_track = &f->tracks[f->num_tracks - 1];
             *cur_track = proto_track;
-            cur_track->tags = talloc_zero(f, struct mp_tags);
             break;
         }
         case CUE_TITLE:
-        case CUE_PERFORMER: {
-            static const char *metanames[] = {
-                [CUE_TITLE] = "title",
-                [CUE_PERFORMER] = "performer",
-            };
-            struct mp_tags *tags = cur_track ? cur_track->tags : f->tags;
-            mp_tags_set_bstr(tags, bstr0(metanames[cmd]), param);
+            cur_track->title = read_quoted(f, &param);
             break;
-        }
         case CUE_INDEX: {
             int type = read_int_2(&param);
             double time = read_time(&param);
-            if (cur_track) {
-                if (type == 1) {
-                    cur_track->start = time;
-                    cur_track->filename = filename;
-                } else if (type == 0) {
-                    cur_track->pregap_start = time;
-                }
+            if (type == 1) {
+                cur_track->start = time;
+                cur_track->filename = filename;
+            } else if (type == 0) {
+                cur_track->pregap_start = time;
             }
             break;
         }
@@ -217,19 +203,4 @@ struct cue_file *mp_parse_cue(struct bstr data)
     }
 
     return f;
-}
-
-int mp_check_embedded_cue(struct cue_file *f)
-{
-    char *fn0 = f->tracks[0].filename;
-    for (int n = 1; n < f->num_tracks; n++) {
-        char *fn = f->tracks[n].filename;
-        // both filenames have the same address (including NULL)
-        if (fn0 == fn)
-            continue;
-        // only one filename is NULL, or the strings don't match
-        if (!fn0 || !fn || strcmp(fn0, fn) != 0)
-            return -1;
-    }
-    return 0;
 }

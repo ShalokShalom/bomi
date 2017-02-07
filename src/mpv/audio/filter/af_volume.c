@@ -71,19 +71,15 @@ static int control(struct af_instance *af, int cmd, void *arg)
         if (af_fmt_is_planar(in->format))
             mp_audio_set_format(af->data, af_fmt_to_planar(af->data->format));
         s->rgain = 1.0;
-        struct replaygain_data *rg = af->replaygain_data;
-        if ((s->rgain_track || s->rgain_album) && rg) {
-            MP_VERBOSE(af, "Replaygain: Track=%f/%f Album=%f/%f\n",
-                       rg->track_gain, rg->track_peak,
-                       rg->album_gain, rg->album_peak);
-
+        if ((s->rgain_track || s->rgain_album) && af->replaygain_data) {
             float gain, peak;
+
             if (s->rgain_track) {
-                gain = rg->track_gain;
-                peak = rg->track_peak;
+                gain = af->replaygain_data->track_gain;
+                peak = af->replaygain_data->track_peak;
             } else {
-                gain = rg->album_gain;
-                peak = rg->album_peak;
+                gain = af->replaygain_data->album_gain;
+                peak = af->replaygain_data->album_peak;
             }
 
             gain += s->rgain_preamp;
@@ -119,7 +115,7 @@ static void filter_plane(struct af_instance *af, struct mp_audio *data, int p)
 {
     struct priv *s = af->priv;
 
-    float level = s->level * s->rgain * from_dB(s->cfg_volume, 20.0, -200.0, 60.0);
+    float level = s->level * s->rgain;
     int num_samples = data->samples * data->spf;
 
     if (af_fmt_from_planar(af->data->format) == AF_FORMAT_S16) {
@@ -162,7 +158,7 @@ static int af_open(struct af_instance *af)
     struct priv *s = af->priv;
     af->control = control;
     af->filter_frame = filter;
-    s->level = 1.0;
+    s->level = from_dB(s->cfg_volume, 20.0, -200.0, 60.0);
     return AF_OK;
 }
 

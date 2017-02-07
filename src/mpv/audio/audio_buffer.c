@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stddef.h>
@@ -117,15 +117,6 @@ void mp_audio_buffer_prepend_silence(struct mp_audio_buffer *ab, int samples)
     mp_audio_realloc_min(ab->buffer, ab->buffer->samples);
     mp_audio_copy(ab->buffer, samples, ab->buffer, 0, oldlen);
     mp_audio_fill_silence(ab->buffer, 0, samples);
-}
-
-void mp_audio_buffer_duplicate(struct mp_audio_buffer *ab, int samples)
-{
-    assert(samples >= 0 && samples <= ab->buffer->samples);
-    int oldlen = ab->buffer->samples;
-    ab->buffer->samples += samples;
-    mp_audio_realloc_min(ab->buffer, ab->buffer->samples);
-    mp_audio_copy(ab->buffer, oldlen, ab->buffer, oldlen - samples, samples);
 }
 
 // Get the start of the current readable buffer.

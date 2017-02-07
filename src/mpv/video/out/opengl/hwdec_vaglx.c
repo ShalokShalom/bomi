@@ -22,7 +22,6 @@
 #include <assert.h>
 
 #include <GL/glx.h>
-#include <va/va_x11.h>
 
 #include "video/out/x11_common.h"
 #include "hwdec.h"
@@ -64,20 +63,16 @@ static void destroy(struct gl_hwdec *hw)
 {
     struct priv *p = hw->priv;
     destroy_texture(hw);
-    if (p->ctx)
-        hwdec_devices_remove(hw->devs, &p->ctx->hwctx);
     va_destroy(p->ctx);
 }
 
 static int create(struct gl_hwdec *hw)
 {
+    if (hw->hwctx)
+        return -1;
     Display *x11disp = glXGetCurrentDisplay();
     if (!x11disp)
         return -1;
-    if (hw->probing) {
-        MP_VERBOSE(hw, "Not using this by default.\n");
-        return -1;
-    }
     int x11scr = DefaultScreen(x11disp);
     struct priv *p = talloc_zero(hw, struct priv);
     hw->priv = p;
@@ -98,6 +93,10 @@ static int create(struct gl_hwdec *hw)
     p->ctx = va_initialize(p->display, p->log, true);
     if (!p->ctx) {
         vaTerminate(p->display);
+        return -1;
+    }
+    if (hw->reject_emulated && va_guess_if_emulated(p->ctx)) {
+        destroy(hw);
         return -1;
     }
 
@@ -126,8 +125,8 @@ static int create(struct gl_hwdec *hw)
         return -1;
     }
 
-    p->ctx->hwctx.driver_name = hw->driver->name;
-    hwdec_devices_add(hw->devs, &p->ctx->hwctx);
+    hw->hwctx = &p->ctx->hwctx;
+    hw->converted_imgfmt = IMGFMT_RGB0;
     return 0;
 }
 
@@ -137,6 +136,8 @@ static int reinit(struct gl_hwdec *hw, struct mp_image_params *params)
     GL *gl = hw->gl;
 
     destroy_texture(hw);
+
+    params->imgfmt = hw->driver->imgfmt;
 
     gl->GenTextures(1, &p->gl_texture);
     gl->BindTexture(GL_TEXTURE_2D, p->gl_texture);
@@ -166,14 +167,11 @@ static int reinit(struct gl_hwdec *hw, struct mp_image_params *params)
     p->glXBindTexImage(p->xdisplay, p->glxpixmap, GLX_FRONT_EXT, NULL);
     gl->BindTexture(GL_TEXTURE_2D, 0);
 
-    params->imgfmt = IMGFMT_RGB0;
-    params->hw_subfmt = 0;
-
     return 0;
 }
 
-static int map_frame(struct gl_hwdec *hw, struct mp_image *hw_image,
-                     struct gl_hwdec_frame *out_frame)
+static int map_image(struct gl_hwdec *hw, struct mp_image *hw_image,
+                     GLuint *out_textures)
 {
     struct priv *p = hw->priv;
     VAStatus status;
@@ -181,32 +179,24 @@ static int map_frame(struct gl_hwdec *hw, struct mp_image *hw_image,
     if (!p->pixmap)
         return -1;
 
+    va_lock(p->ctx);
     status = vaPutSurface(p->display, va_surface_id(hw_image), p->pixmap,
                           0, 0, hw_image->w, hw_image->h,
                           0, 0, hw_image->w, hw_image->h,
                           NULL, 0,
-                          va_get_colorspace_flag(hw_image->params.color.space));
+                          va_get_colorspace_flag(hw_image->params.colorspace));
     CHECK_VA_STATUS(p, "vaPutSurface()");
+    va_unlock(p->ctx);
 
-    *out_frame = (struct gl_hwdec_frame){
-        .planes = {
-            {
-                .gl_texture = p->gl_texture,
-                .gl_target = GL_TEXTURE_2D,
-                .tex_w = hw_image->w,
-                .tex_h = hw_image->h,
-            },
-        },
-    };
+    out_textures[0] = p->gl_texture;
     return 0;
 }
 
 const struct gl_hwdec_driver gl_hwdec_vaglx = {
-    .name = "vaapi-glx",
-    .api = HWDEC_VAAPI,
+    .api_name = "vaapi",
     .imgfmt = IMGFMT_VAAPI,
     .create = create,
     .reinit = reinit,
-    .map_frame = map_frame,
+    .map_image = map_image,
     .destroy = destroy,
 };

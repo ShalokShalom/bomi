@@ -39,7 +39,7 @@
 #include "common/msg.h"
 #include "options/options.h"
 #include "options/path.h"
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "osdep/io.h"
 #include "osdep/path.h"
 
@@ -169,12 +169,6 @@ char *mp_get_user_path(void *talloc_ctx, struct mpv_global *global,
             const char *rest0 = rest.start; // ok in this case
             if (bstr_equals0(prefix, "~")) {
                 res = mp_find_config_file(talloc_ctx, global, rest0);
-                if (!res) {
-                    void *tmp = talloc_new(NULL);
-                    const char *p = mp_get_platform_path(tmp, global, "home");
-                    res = mp_path_join_bstr(talloc_ctx, bstr0(p), rest);
-                    talloc_free(tmp);
-                }
             } else if (bstr_equals0(prefix, "")) {
                 res = mp_path_join_bstr(talloc_ctx, bstr0(getenv("HOME")), rest);
             } else if (bstr_eatstart0(&prefix, "~")) {
@@ -219,21 +213,6 @@ struct bstr mp_dirname(const char *path)
     return ret;
 }
 
-
-#if HAVE_DOS_PATHS
-static const char mp_path_separators[] = "\\/";
-#else
-static const char mp_path_separators[] = "/";
-#endif
-
-// Mutates path and removes a trailing '/' (or '\' on Windows)
-void mp_path_strip_trailing_separator(char *path)
-{
-    size_t len = strlen(path);
-    if (len > 0 && strchr(mp_path_separators, path[len - 1]))
-        path[len - 1] = '\0';
-}
-
 char *mp_splitext(const char *path, bstr *root)
 {
     assert(path);
@@ -247,19 +226,17 @@ char *mp_splitext(const char *path, bstr *root)
 
 char *mp_path_join_bstr(void *talloc_ctx, struct bstr p1, struct bstr p2)
 {
-    bool test;
     if (p1.len == 0)
         return bstrdup0(talloc_ctx, p2);
     if (p2.len == 0)
         return bstrdup0(talloc_ctx, p1);
 
 #if HAVE_DOS_PATHS
-    test = (p2.len >= 2 && p2.start[1] == ':')
-        || p2.start[0] == '\\' || p2.start[0] == '/';
+    if ((p2.len >= 2 && p2.start[1] == ':')
+        || p2.start[0] == '\\' || p2.start[0] == '/')
 #else
-    test = p2.start[0] == '/';
+    if (p2.start[0] == '/')
 #endif
-    if (test)
         return bstrdup0(talloc_ctx, p2);   // absolute path
 
     bool have_separator;

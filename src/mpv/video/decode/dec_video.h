@@ -31,22 +31,21 @@ struct dec_video {
     struct mp_log *log;
     struct mpv_global *global;
     struct MPOpts *opts;
+    struct vf_chain *vfilter;  // video filter chain
+    struct vo *vo;  // (still) needed by video_set/get_colors
     const struct vd_functions *vd_driver;
-    struct mp_hwdec_devices *hwdec_devs; // video output hwdec handles
+    struct mp_hwdec_info *hwdec_info; // video output hwdec handles
     struct sh_stream *header;
-    struct mp_codec_params *codec;
 
     char *decoder_desc;
 
-    float fps;            // FPS from demuxer or from user override
+    // Used temporarily during decoding (important for format changes)
+    struct mp_image *waiting_decoded_mpi;
+    struct mp_image_params decoder_output; // last output of the decoder
 
-    int dropped_frames;
-
-    // Internal (shared with vd_lavc.c).
+    struct mp_image *cover_art_mpi;
 
     void *priv; // for free use by vd_driver
-
-    // Strictly internal (dec_video.c).
 
     // Last PTS from decoder (set with each vd_driver->decode() call)
     double codec_pts;
@@ -56,43 +55,49 @@ struct dec_video {
     double codec_dts;
     int num_codec_dts_problems;
 
-    // PTS or DTS of packet first read
-    double first_packet_pdts;
+    // PTS sorting (obscure, non-default)
+    double buffered_pts[32];
+    int num_buffered_pts;
+    double sorted_pts;
+    int num_sorted_pts_problems;
+    double unsorted_pts;
+    int num_unsorted_pts_problems;
+    int pts_assoc_mode;
+
+    // PTS or DTS of packet last read
+    double last_packet_pdts;
 
     // There was at least one packet with non-sense timestamps.
     int has_broken_packet_pts; // <0: uninitialized, 0: no problems, 1: broken
 
-    int has_broken_decoded_pts;
-
     // Final PTS of previously decoded image
     double decoded_pts;
 
-    struct mp_image_params dec_format, last_format, fixed_format;
+    float fps;            // FPS from demuxer or from user override
     float initial_decoder_aspect;
 
-    double start_pts;
-    double start, end;
-    struct demux_packet *new_segment;
-    struct demux_packet *packet;
-    bool framedrop_enabled;
-    struct mp_image *current_mpi;
-    int current_state;
+    // State used only by player/video.c
+    double last_pts;
 };
 
 struct mp_decoder_list *video_decoder_list(void);
 
-bool video_init_best_codec(struct dec_video *d_video);
+bool video_init_best_codec(struct dec_video *d_video, char* video_decoders);
 void video_uninit(struct dec_video *d_video);
 
-void video_work(struct dec_video *d_video);
-int video_get_frame(struct dec_video *d_video, struct mp_image **out_mpi);
+struct demux_packet;
+struct mp_image *video_decode(struct dec_video *d_video,
+                              struct demux_packet *packet,
+                              int drop_frame);
 
-void video_set_framedrop(struct dec_video *d_video, bool enabled);
-void video_set_start(struct dec_video *d_video, double start_pts);
-
+int video_get_colors(struct dec_video *d_video, const char *item, int *value);
+int video_set_colors(struct dec_video *d_video, const char *item, int value);
+void video_reset_decoding(struct dec_video *d_video);
 int video_vd_control(struct dec_video *d_video, int cmd, void *arg);
-void video_reset(struct dec_video *d_video);
-void video_reset_params(struct dec_video *d_video);
-void video_get_dec_params(struct dec_video *d_video, struct mp_image_params *p);
+
+int video_reconfig_filters(struct dec_video *d_video,
+                           const struct mp_image_params *params);
+
+int video_vf_vo_control(struct dec_video *d_video, int vf_cmd, void *data);
 
 #endif /* MPLAYER_DEC_VIDEO_H */

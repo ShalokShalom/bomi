@@ -1,24 +1,28 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * You can alternatively redistribute this file and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  */
 
 #include <string.h>
-#include <math.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "config.h"
 
@@ -28,7 +32,8 @@
 #include "common/msg.h"
 #include "options/m_option.h"
 #include "options/path.h"
-#include "video/csputils.h"
+
+#include "video.h"
 #include "lcms.h"
 
 #include "osdep/io.h"
@@ -42,15 +47,12 @@
 struct gl_lcms {
     void *icc_data;
     size_t icc_size;
-    char *current_profile;
-    bool using_memory_profile;
+    char *icc_path;
     bool changed;
-    enum mp_csp_prim current_prim;
-    enum mp_csp_trc current_trc;
 
     struct mp_log *log;
     struct mpv_global *global;
-    struct mp_icc_opts *opts;
+    struct mp_icc_opts opts;
 };
 
 static bool parse_3dlut_size(const char *arg, int *p1, int *p2, int *p3)
@@ -59,7 +61,7 @@ static bool parse_3dlut_size(const char *arg, int *p1, int *p2, int *p3)
         return false;
     for (int n = 0; n < 3; n++) {
         int s = ((int[]) { *p1, *p2, *p3 })[n];
-        if (s < 2 || s > 512)
+        if (s < 2 || s > 512 || ((s - 1) & s))
             return false;
     }
     return true;
@@ -81,16 +83,14 @@ const struct m_sub_options mp_icc_conf = {
         OPT_FLAG("icc-profile-auto", profile_auto, 0),
         OPT_STRING("icc-cache-dir", cache_dir, 0),
         OPT_INT("icc-intent", intent, 0),
-        OPT_INTRANGE("icc-contrast", contrast, 0, 0, 100000),
-        OPT_STRING_VALIDATE("icc-3dlut-size", size_str, 0, validate_3dlut_size_opt),
+        OPT_STRING_VALIDATE("3dlut-size", size_str, 0, validate_3dlut_size_opt),
 
-        OPT_REPLACED("3dlut-size", "icc-3dlut-size"),
         OPT_REMOVED("icc-cache", "see icc-cache-dir"),
         {0}
     },
     .size = sizeof(struct mp_icc_opts),
     .defaults = &(const struct mp_icc_opts) {
-        .size_str = "64x64x64",
+        .size_str = "128x256x64",
         .intent = INTENT_RELATIVE_COLORIMETRIC,
     },
 };
@@ -102,223 +102,93 @@ static void lcms2_error_handler(cmsContext ctx, cmsUInt32Number code,
     MP_ERR(p, "lcms2: %s\n", msg);
 }
 
-static void load_profile(struct gl_lcms *p)
+static bool load_profile(struct gl_lcms *p)
 {
-    talloc_free(p->icc_data);
-    p->icc_data = NULL;
-    p->icc_size = 0;
-    p->using_memory_profile = false;
-    talloc_free(p->current_profile);
-    p->current_profile = NULL;
+    if (p->icc_data && p->icc_size)
+        return true;
 
-    if (!p->opts->profile || !p->opts->profile[0])
-        return;
+    if (!p->icc_path)
+        return false;
 
-    char *fname = mp_get_user_path(NULL, p->global, p->opts->profile);
+    char *fname = mp_get_user_path(NULL, p->global, p->icc_path);
     MP_VERBOSE(p, "Opening ICC profile '%s'\n", fname);
     struct bstr iccdata = stream_read_file(fname, p, p->global,
                                            100000000); // 100 MB
     talloc_free(fname);
     if (!iccdata.len)
-        return;
-
-    talloc_free(p->icc_data);
+        return false;
 
     p->icc_data = iccdata.start;
     p->icc_size = iccdata.len;
-    p->current_profile = talloc_strdup(p, p->opts->profile);
+    return true;
 }
 
 struct gl_lcms *gl_lcms_init(void *talloc_ctx, struct mp_log *log,
-                             struct mpv_global *global,
-                             struct mp_icc_opts *opts)
+                             struct mpv_global *global)
 {
     struct gl_lcms *p = talloc_ptrtype(talloc_ctx, p);
     *p = (struct gl_lcms) {
         .global = global,
         .log = log,
-        .opts = opts,
+        .changed = true,
     };
-    gl_lcms_update_options(p);
     return p;
 }
 
-void gl_lcms_update_options(struct gl_lcms *p)
+void gl_lcms_set_options(struct gl_lcms *p, struct mp_icc_opts *opts)
 {
-    if ((p->using_memory_profile && !p->opts->profile_auto) ||
-        !bstr_equals(bstr0(p->opts->profile), bstr0(p->current_profile)))
-    {
-        load_profile(p);
-    }
-
+    p->opts = *opts;
+    p->icc_path = talloc_strdup(p, p->opts.profile);
+    load_profile(p);
     p->changed = true; // probably
 }
 
 // Warning: profile.start must point to a ta allocation, and the function
 //          takes over ownership.
-// Returns whether the internal profile was changed.
-bool gl_lcms_set_memory_profile(struct gl_lcms *p, bstr profile)
+void gl_lcms_set_memory_profile(struct gl_lcms *p, bstr *profile)
 {
-    if (!p->opts->profile_auto || (p->opts->profile && p->opts->profile[0])) {
-        talloc_free(profile.start);
-        return false;
+    if (!p->opts.profile_auto) {
+        talloc_free(profile->start);
+        return;
     }
 
-    if (p->using_memory_profile &&
-        p->icc_data && profile.start &&
-        profile.len == p->icc_size &&
-        memcmp(profile.start, p->icc_data, p->icc_size) == 0)
+    if (!p->icc_path && p->icc_data && profile->start &&
+        profile->len == p->icc_size &&
+        memcmp(profile->start, p->icc_data, p->icc_size) == 0)
     {
-        talloc_free(profile.start);
-        return false;
+        talloc_free(profile->start);
+        return;
     }
 
     p->changed = true;
-    p->using_memory_profile = true;
+
+    talloc_free(p->icc_path);
+    p->icc_path = NULL;
 
     talloc_free(p->icc_data);
 
-    p->icc_data = talloc_steal(p, profile.start);
-    p->icc_size = profile.len;
-
-    return true;
+    p->icc_data = talloc_steal(p, profile->start);
+    p->icc_size = profile->len;
 }
 
-// Return whether the profile or config has changed since the last time it was
-// retrieved. If it has changed, gl_lcms_get_lut3d() should be called.
-bool gl_lcms_has_changed(struct gl_lcms *p, enum mp_csp_prim prim,
-                         enum mp_csp_trc trc)
+// Return and _reset_ whether the lookul table has changed since the last call.
+// If it has changed, gl_lcms_get_lut3d() should be called.
+bool gl_lcms_has_changed(struct gl_lcms *p)
 {
-    return p->changed || p->current_prim != prim || p->current_trc != trc;
+    bool change = p->changed;
+    p->changed = false;
+    return change;
 }
 
-// Whether a profile is set. (gl_lcms_get_lut3d() is expected to return a lut,
-// but it could still fail due to runtime errors, such as invalid icc data.)
-bool gl_lcms_has_profile(struct gl_lcms *p)
-{
-    return p->icc_size > 0;
-}
-
-static cmsHPROFILE get_vid_profile(struct gl_lcms *p, cmsContext cms,
-                                   cmsHPROFILE disp_profile,
-                                   enum mp_csp_prim prim, enum mp_csp_trc trc)
-{
-    // The input profile for the transformation is dependent on the video
-    // primaries and transfer characteristics
-    struct mp_csp_primaries csp = mp_get_csp_primaries(prim);
-    cmsCIExyY wp_xyY = {csp.white.x, csp.white.y, 1.0};
-    cmsCIExyYTRIPLE prim_xyY = {
-        .Red   = {csp.red.x,   csp.red.y,   1.0},
-        .Green = {csp.green.x, csp.green.y, 1.0},
-        .Blue  = {csp.blue.x,  csp.blue.y,  1.0},
-    };
-
-    cmsToneCurve *tonecurve[3] = {0};
-    switch (trc) {
-    case MP_CSP_TRC_LINEAR:  tonecurve[0] = cmsBuildGamma(cms, 1.0); break;
-    case MP_CSP_TRC_GAMMA18: tonecurve[0] = cmsBuildGamma(cms, 1.8); break;
-    case MP_CSP_TRC_GAMMA22: tonecurve[0] = cmsBuildGamma(cms, 2.2); break;
-    case MP_CSP_TRC_GAMMA28: tonecurve[0] = cmsBuildGamma(cms, 2.8); break;
-
-    case MP_CSP_TRC_SRGB:
-        // Values copied from Little-CMS
-        tonecurve[0] = cmsBuildParametricToneCurve(cms, 4,
-                (double[5]){2.40, 1/1.055, 0.055/1.055, 1/12.92, 0.04045});
-        break;
-
-    case MP_CSP_TRC_PRO_PHOTO:
-        tonecurve[0] = cmsBuildParametricToneCurve(cms, 4,
-                (double[5]){1.8, 1.0, 0.0, 1/16.0, 0.03125});
-        break;
-
-    case MP_CSP_TRC_BT_1886: {
-        // To build an appropriate BT.1886 transformation we need access to
-        // the display's black point, so we LittleCMS' detection function.
-        // Relative colorimetric is used since we want to approximate the
-        // BT.1886 to the target device's actual black point even in e.g.
-        // perceptual mode
-        const int intent = MP_INTENT_RELATIVE_COLORIMETRIC;
-        cmsCIEXYZ bp_XYZ;
-        if (!cmsDetectBlackPoint(&bp_XYZ, disp_profile, intent, 0))
-            return false;
-
-        // Map this XYZ value back into the (linear) source space
-        cmsToneCurve *linear = cmsBuildGamma(cms, 1.0);
-        cmsHPROFILE rev_profile = cmsCreateRGBProfileTHR(cms, &wp_xyY, &prim_xyY,
-                (cmsToneCurve*[3]){linear, linear, linear});
-        cmsHPROFILE xyz_profile = cmsCreateXYZProfile();
-        cmsHTRANSFORM xyz2src = cmsCreateTransformTHR(cms,
-                xyz_profile, TYPE_XYZ_DBL, rev_profile, TYPE_RGB_DBL,
-                intent, 0);
-        cmsFreeToneCurve(linear);
-        cmsCloseProfile(rev_profile);
-        cmsCloseProfile(xyz_profile);
-        if (!xyz2src)
-            return false;
-
-        double src_black[3];
-        cmsDoTransform(xyz2src, &bp_XYZ, src_black, 1);
-        cmsDeleteTransform(xyz2src);
-
-        // Contrast limiting
-        if (p->opts->contrast > 0) {
-            for (int i = 0; i < 3; i++)
-                src_black[i] = MPMAX(src_black[i], 1.0 / p->opts->contrast);
-        }
-
-        // Built-in contrast failsafe
-        double contrast = 3.0 / (src_black[0] + src_black[1] + src_black[2]);
-        if (contrast > 100000) {
-            MP_WARN(p, "ICC profile detected contrast very high (>100000),"
-                    " falling back to contrast 1000 for sanity. Set the"
-                    " icc-contrast option to silence this warning.\n");
-            src_black[0] = src_black[1] = src_black[2] = 1.0 / 1000;
-        }
-
-        // Build the parametric BT.1886 transfer curve, one per channel
-        for (int i = 0; i < 3; i++) {
-            const double gamma = 2.40;
-            double binv = pow(src_black[i], 1.0/gamma);
-            tonecurve[i] = cmsBuildParametricToneCurve(cms, 6,
-                    (double[4]){gamma, 1.0 - binv, binv, 0.0});
-        }
-        break;
-    }
-
-    default:
-        abort();
-    }
-
-    if (!tonecurve[0])
-        return false;
-
-    if (!tonecurve[1]) tonecurve[1] = tonecurve[0];
-    if (!tonecurve[2]) tonecurve[2] = tonecurve[0];
-
-    cmsHPROFILE *vid_profile = cmsCreateRGBProfileTHR(cms, &wp_xyY, &prim_xyY,
-                                                      tonecurve);
-
-    if (tonecurve[2] != tonecurve[0]) cmsFreeToneCurve(tonecurve[2]);
-    if (tonecurve[1] != tonecurve[0]) cmsFreeToneCurve(tonecurve[1]);
-    cmsFreeToneCurve(tonecurve[0]);
-
-    return vid_profile;
-}
-
-bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d,
-                       enum mp_csp_prim prim, enum mp_csp_trc trc)
+bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d)
 {
     int s_r, s_g, s_b;
     bool result = false;
 
-    p->changed = false;
-    p->current_prim = prim;
-    p->current_trc = trc;
-
-    if (!parse_3dlut_size(p->opts->size_str, &s_r, &s_g, &s_b))
+    if (!parse_3dlut_size(p->opts.size_str, &s_r, &s_g, &s_b))
         return false;
 
-    if (!gl_lcms_has_profile(p))
+    if (!p->icc_data && !p->icc_path)
         return false;
 
     void *tmp = talloc_new(NULL);
@@ -327,14 +197,13 @@ bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d,
     cmsContext cms = NULL;
 
     char *cache_file = NULL;
-    if (p->opts->cache_dir && p->opts->cache_dir[0]) {
+    if (p->opts.cache_dir && p->opts.cache_dir[0]) {
         // Gamma is included in the header to help uniquely identify it,
         // because we may change the parameter in the future or make it
         // customizable, same for the primaries.
         char *cache_info = talloc_asprintf(tmp,
-                "ver=1.3, intent=%d, size=%dx%dx%d, prim=%d, trc=%d, "
-                "contrast=%d\n",
-                p->opts->intent, s_r, s_g, s_b, prim, trc, p->opts->contrast);
+                "ver=1.1, intent=%d, size=%dx%dx%d, gamma=2.4, prim=bt2020\n",
+                p->opts.intent, s_r, s_g, s_b);
 
         uint8_t hash[32];
         struct AVSHA *sha = av_sha_alloc();
@@ -346,7 +215,7 @@ bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d,
         av_sha_final(sha, hash);
         av_free(sha);
 
-        char *cache_dir = mp_get_user_path(tmp, p->global, p->opts->cache_dir);
+        char *cache_dir = mp_get_user_path(tmp, p->global, p->opts.cache_dir);
         cache_file = talloc_strdup(tmp, "");
         for (int i = 0; i < sizeof(hash); i++)
             cache_file = talloc_asprintf_append(cache_file, "%02X", hash[i]);
@@ -356,7 +225,7 @@ bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d,
     }
 
     // check cache
-    if (cache_file && stat(cache_file, &(struct stat){0}) == 0) {
+    if (cache_file) {
         MP_VERBOSE(p, "Opening 3D LUT cache in file '%s'.\n", cache_file);
         struct bstr cachedata = stream_read_file(cache_file, tmp, p->global,
                                                  1000000000); // 1 GB
@@ -378,17 +247,27 @@ bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d,
     if (!profile)
         goto error_exit;
 
-    cmsHPROFILE vid_profile = get_vid_profile(p, cms, profile, prim, trc);
-    if (!vid_profile) {
-        cmsCloseProfile(profile);
-        goto error_exit;
-    }
+    // We always generate the 3DLUT against BT.2020, and transform into this
+    // space inside the shader if the source differs.
+    struct mp_csp_primaries csp = mp_get_csp_primaries(MP_CSP_PRIM_BT_2020);
 
+    cmsCIExyY wp = {csp.white.x, csp.white.y, 1.0};
+    cmsCIExyYTRIPLE prim = {
+        .Red   = {csp.red.x,   csp.red.y,   1.0},
+        .Green = {csp.green.x, csp.green.y, 1.0},
+        .Blue  = {csp.blue.x,  csp.blue.y,  1.0},
+    };
+
+    // 2.4 is arbitrarily used as a gamma compression factor for the 3DLUT,
+    // reducing artifacts due to rounding errors on wide gamut profiles
+    cmsToneCurve *tonecurve = cmsBuildGamma(cms, 2.4);
+    cmsHPROFILE vid_profile = cmsCreateRGBProfileTHR(cms, &wp, &prim,
+                        (cmsToneCurve*[3]){tonecurve, tonecurve, tonecurve});
+    cmsFreeToneCurve(tonecurve);
     cmsHTRANSFORM trafo = cmsCreateTransformTHR(cms, vid_profile, TYPE_RGB_16,
                                                 profile, TYPE_RGB_16,
-                                                p->opts->intent,
-                                                cmsFLAGS_HIGHRESPRECALC |
-                                                cmsFLAGS_BLACKPOINTCOMPENSATION);
+                                                p->opts.intent,
+                                                cmsFLAGS_HIGHRESPRECALC);
     cmsCloseProfile(profile);
     cmsCloseProfile(vid_profile);
 
@@ -450,31 +329,16 @@ const struct m_sub_options mp_icc_conf = {
     .defaults = &(const struct mp_icc_opts) {0},
 };
 
+
 struct gl_lcms *gl_lcms_init(void *talloc_ctx, struct mp_log *log,
-                             struct mpv_global *global,
-                             struct mp_icc_opts *opts)
+                             struct mpv_global *global)
 {
     return (struct gl_lcms *) talloc_new(talloc_ctx);
 }
 
-void gl_lcms_update_options(struct gl_lcms *p) { }
-bool gl_lcms_set_memory_profile(struct gl_lcms *p, bstr profile) {return false;}
-
-bool gl_lcms_has_changed(struct gl_lcms *p, enum mp_csp_prim prim,
-                         enum mp_csp_trc trc)
-{
-    return false;
-}
-
-bool gl_lcms_has_profile(struct gl_lcms *p)
-{
-    return false;
-}
-
-bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **result_lut3d,
-                       enum mp_csp_prim prim, enum mp_csp_trc trc)
-{
-    return false;
-}
+void gl_lcms_set_options(struct gl_lcms *p, struct mp_icc_opts *opts) { }
+void gl_lcms_set_memory_profile(struct gl_lcms *p, bstr *profile) { }
+bool gl_lcms_get_lut3d(struct gl_lcms *p, struct lut3d **x) { return false; }
+bool gl_lcms_has_changed(struct gl_lcms *p) { return false; }
 
 #endif

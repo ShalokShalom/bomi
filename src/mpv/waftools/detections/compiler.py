@@ -41,9 +41,7 @@ def __add_generic_flags__(ctx):
 def __add_gcc_flags__(ctx):
     ctx.env.CFLAGS += ["-Wall", "-Wundef", "-Wmissing-prototypes", "-Wshadow",
                        "-Wno-switch", "-Wparentheses", "-Wpointer-arith",
-                       "-Wno-pointer-sign",
-                       # GCC bug 66425
-                       "-Wno-unused-result"]
+                       "-Wno-pointer-sign"]
 
 def __add_clang_flags__(ctx):
     ctx.env.CFLAGS += ["-Wno-logical-op-parentheses", "-fcolor-diagnostics",
@@ -51,10 +49,8 @@ def __add_clang_flags__(ctx):
                        "-Wno-tautological-constant-out-of-range-compare" ]
 
 def __add_mswin_flags__(ctx):
-    ctx.env.CFLAGS += ['-D_WIN32_WINNT=0x0601', '-DUNICODE', '-DCOBJMACROS',
-                       '-DINITGUID', '-U__STRICT_ANSI__']
-    ctx.env.LAST_LINKFLAGS += ['-Wl,--major-os-version=6,--minor-os-version=0',
-                 '-Wl,--major-subsystem-version=6,--minor-subsystem-version=0']
+    ctx.env.CFLAGS += ['-D_WIN32_WINNT=0x600', '-DUNICODE', '-DCOBJMACROS',
+                       '-U__STRICT_ANSI__']
 
 def __add_mingw_flags__(ctx):
     __add_mswin_flags__(ctx)
@@ -82,3 +78,4 @@ def __apply_map__(ctx, fnmap):
 def configure(ctx):
     __add_generic_flags__(ctx)
     __apply_map__(ctx, __compiler_map__)
+

@@ -33,11 +33,8 @@ typedef struct vd_functions
     int (*init)(struct dec_video *vd, const char *decoder);
     void (*uninit)(struct dec_video *vd);
     int (*control)(struct dec_video *vd, int cmd, void *arg);
-    // Return whether or not the packet has been consumed.
-    bool (*send_packet)(struct dec_video *vd, struct demux_packet *pkt);
-    // Return whether decoding is still going on (false if EOF was reached).
-    // Never returns false & *out_image set, but can return true with no image.
-    bool (*receive_frame)(struct dec_video *vd, struct mp_image **out_image);
+    struct mp_image *(*decode)(struct dec_video *vd, struct demux_packet *pkt,
+                               int flags);
 } vd_functions_t;
 
 // NULL terminated array of all drivers
@@ -45,12 +42,9 @@ extern const vd_functions_t *const mpcodecs_vd_drivers[];
 
 enum vd_ctrl {
     VDCTRL_RESET = 1, // reset decode state after seeking
+    VDCTRL_QUERY_UNSEEN_FRAMES, // current decoder lag
     VDCTRL_FORCE_HWDEC_FALLBACK, // force software decoding fallback
     VDCTRL_GET_HWDEC,
-    VDCTRL_REINIT,
-    VDCTRL_GET_BFRAMES,
-    // framedrop mode: 0=none, 1=standard, 2=hrseek
-    VDCTRL_SET_FRAMEDROP,
 };
 
 #endif /* MPLAYER_VD_H */

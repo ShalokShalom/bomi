@@ -86,7 +86,6 @@ typedef struct mp_cmd {
     double scale;               // for scaling numeric arguments
     const struct mp_cmd_def *def;
     char *sender; // name of the client API user which sent this
-    char *key_name; // string representation of the key binding
 } mp_cmd_t;
 
 struct mp_input_src {
@@ -132,9 +131,6 @@ void mp_input_src_feed_cmd_text(struct mp_input_src *src, char *buf, size_t len)
 // with modifiers applied. MP_INPUT_RELEASE_ALL is also a valid value.
 void mp_input_put_key(struct input_ctx *ictx, int code);
 
-// Like mp_input_put_key(), but ignore mouse disable option for mouse buttons.
-void mp_input_put_key_artificial(struct input_ctx *ictx, int code);
-
 // Like mp_input_put_key(), but process all UTF-8 characters in the given
 // string as key events.
 void mp_input_put_key_utf8(struct input_ctx *ictx, int mods, struct bstr t);
@@ -145,9 +141,6 @@ void mp_input_put_axis(struct input_ctx *ictx, int direction, double value);
 
 // Update mouse position (in window coordinates).
 void mp_input_set_mouse_pos(struct input_ctx *ictx, int x, int y);
-
-// Like mp_input_set_mouse_pos(), but ignore mouse disable option.
-void mp_input_set_mouse_pos_artificial(struct input_ctx *ictx, int x, int y);
 
 void mp_input_get_mouse_pos(struct input_ctx *ictx, int *x, int *y);
 
@@ -196,13 +189,9 @@ void mp_input_disable_all_sections(struct input_ctx *ictx);
 //  builtin: create as builtin section; this means if the user defines bindings
 //           using "{name}", they won't be ignored or overwritten - instead,
 //           they are preferred to the bindings defined with this call
-//  owner: string ID of the client which defined this, or NULL
 // If the section already exists, its bindings are removed and replaced.
 void mp_input_define_section(struct input_ctx *ictx, char *name, char *location,
-                             char *contents, bool builtin, char *owner);
-
-// Remove all sections that have been defined by the given owner.
-void mp_input_remove_sections_by_owner(struct input_ctx *ictx, char *owner);
+                             char *contents, bool builtin);
 
 // Define where on the screen the named input section should receive.
 // Setting a rectangle of size 0 unsets the mouse area.
@@ -223,26 +212,26 @@ bool mp_input_test_dragging(struct input_ctx *ictx, int x, int y);
 
 // Initialize the input system
 struct mpv_global;
-struct input_ctx *mp_input_init(struct mpv_global *global,
-                                void (*wakeup_cb)(void *ctx),
-                                void *wakeup_ctx);
+struct input_ctx *mp_input_init(struct mpv_global *global);
 
-void mp_input_load_config(struct input_ctx *ictx);
-
-void mp_input_update_opts(struct input_ctx *ictx);
+// Load config, options, and devices.
+void mp_input_load(struct input_ctx *ictx);
 
 void mp_input_uninit(struct input_ctx *ictx);
 
-// Return number of seconds until the next autorepeat event will be generated.
-// Returns INFINITY if no autorepeated key is active.
-double mp_input_get_delay(struct input_ctx *ictx);
+// Sleep for the given amount of seconds, until mp_input_wakeup() is called,
+// or new input arrives. seconds<=0 returns immediately.
+void mp_input_wait(struct input_ctx *ictx, double seconds);
 
 // Wake up sleeping input loop from another thread.
 void mp_input_wakeup(struct input_ctx *ictx);
 
+void mp_input_wakeup_nolock(struct input_ctx *ictx);
+
 // Used to asynchronously abort playback. Needed because the core still can
 // block on network in some situations.
-void mp_input_set_cancel(struct input_ctx *ictx, void (*cb)(void *c), void *c);
+struct mp_cancel;
+void mp_input_set_cancel(struct input_ctx *ictx, struct mp_cancel *cancel);
 
 // If this returns true, use Right Alt key as Alt Gr to produce special
 // characters. If false, count Right Alt as the modifier Alt key.
@@ -260,14 +249,5 @@ struct mp_client_api;
 struct mp_ipc_ctx *mp_init_ipc(struct mp_client_api *client_api,
                                struct mpv_global *global);
 void mp_uninit_ipc(struct mp_ipc_ctx *ctx);
-
-// Serialize the given mpv_event structure to JSON. Returns an allocated string.
-struct mpv_event;
-char *mp_json_encode_event(struct mpv_event *event);
-
-// Given the raw IPC input buffer "buf", remove the first newline-separated
-// command, execute it and return the result (if any) as an allocated string.
-struct mpv_handle;
-char *mp_ipc_consume_next_command(struct mpv_handle *client, void *ctx, bstr *buf);
 
 #endif /* MPLAYER_INPUT_H */

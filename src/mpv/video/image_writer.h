@@ -15,8 +15,6 @@
  * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "options/m_option.h"
-
 struct mp_image;
 struct mp_log;
 
@@ -37,7 +35,7 @@ struct image_writer_opts {
 
 extern const struct image_writer_opts image_writer_opts_defaults;
 
-extern const struct m_option image_writer_opts[];
+extern const struct m_sub_options image_writer_conf;
 
 // Return the file extension that will be used, e.g. "png".
 const char *image_writer_file_ext(const struct image_writer_opts *opts);

@@ -25,24 +25,15 @@
 // Holds one packet/frame/whatever
 typedef struct demux_packet {
     int len;
-    unsigned char *buffer;
-
     double pts;
     double dts;
     double duration;
+    int64_t pos; // position in source file byte stream
+    unsigned char *buffer;
     bool keyframe;
-
-    int64_t pos;        // position in source file byte stream
-    int stream;         // source stream index
-
-    // segmentation (ordered chapters, EDL)
-    struct mp_codec_params *codec;
-    double start, end;
-    bool new_segment;
-
-    // private
+    int stream; // source stream index
     struct demux_packet *next;
-    struct AVPacket *avpacket;   // keep the buffer allocation and sidedata
+    struct AVPacket *avpacket;   // keep the buffer allocation
 } demux_packet_t;
 
 struct demux_packet *new_demux_packet(size_t len);
@@ -55,7 +46,5 @@ struct demux_packet *demux_copy_packet(struct demux_packet *dp);
 void demux_packet_copy_attribs(struct demux_packet *dst, struct demux_packet *src);
 
 int demux_packet_set_padding(struct demux_packet *dp, int start, int end);
-int demux_packet_add_blockadditional(struct demux_packet *dp, uint64_t id,
-                                     void *data, size_t size);
 
 #endif /* MPLAYER_DEMUX_PACKET_H */

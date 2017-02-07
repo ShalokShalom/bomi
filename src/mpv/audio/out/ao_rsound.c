@@ -26,7 +26,7 @@
 #include <unistd.h>
 #include <rsound.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "options/m_option.h"
 #include "osdep/timer.h"
@@ -156,12 +156,9 @@ const struct ao_driver audio_out_rsound = {
     .resume    = audio_resume,
     .priv_size = sizeof(struct priv),
     .options   = (const struct m_option[]) {
-        OPT_STRING("host", host, 0,
-            .deprecation_message = "request --audio-device support on issue tracker"),
-        OPT_STRING("port", port, 0,
-            .deprecation_message = "request --audio-device support on issue tracker"),
+        OPT_STRING("host", host, 0),
+        OPT_STRING("port", port, 0),
         {0}
     },
-    .options_prefix = "rsound",
 };
 

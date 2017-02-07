@@ -151,15 +151,15 @@ Available filters are:
         :yes: Enable accurate rounding.
 
 ``dsize[=w:h:aspect-method:r:aspect]``
-    Changes the intended display aspect at an arbitrary point in the
+    Changes the intended display size/aspect at an arbitrary point in the
     filter chain. Aspect can be given as a fraction (4/3) or floating point
-    number (1.33). Note that this filter does *not* do any scaling itself; it
+    number (1.33). Alternatively, you may specify the exact display width and
+    height desired. Note that this filter does *not* do any scaling itself; it
     just affects what later scalers (software or hardware) will do when
     auto-scaling to the correct aspect.
 
     ``<w>,<h>``
-        New aspect ratio given by a display width and height. Unlike older mpv
-        versions or MPlayer, this does not set the display size.
+        New display width and height.
 
         Can also be these special values:
 
@@ -214,7 +214,7 @@ Available filters are:
         Format name, e.g. rgb15, bgr24, 420p, etc. (default: don't change).
     ``<outfmt>``
         Format name that should be substituted for the output. If they do not
-        have the same bytes per pixel and chroma subsampling, it will fail.
+        have the same bytes per pixel and chroma subsamplimg, it will fail.
     ``<colormatrix>``
         Controls the YUV to RGB color space conversion when playing video. There
         are various standards. Normally, BT.601 should be used for SD video, and
@@ -259,6 +259,26 @@ Available filters are:
         :limited:   limited range (16-235 for luma, 16-240 for chroma)
         :full:      full range (0-255 for both luma and chroma)
 
+    ``<outputlevels>``
+        RGB color levels used with YUV to RGB conversion. Normally, output devices
+        such as PC monitors use full range color levels. However, some TVs and
+        video monitors expect studio RGB levels. Providing full range output to a
+        device expecting studio level input results in crushed blacks and whites,
+        the reverse in dim gray blacks and dim whites.
+
+        The same limitations as with ``<colormatrix>`` apply.
+
+        Available color ranges are:
+
+        :auto:      automatic selection (equals to full range) (default)
+        :limited:   limited range (16-235 per component), studio levels
+        :full:      full range (0-255 per component), PC levels
+
+        .. note::
+
+            It is advisable to use your graphics driver's color range option
+            instead, if available.
+
     ``<primaries>``
         RGB primaries the source file was encoded with. Normally this should be set
         in the file header, but when playing broken or mistagged files this can be
@@ -288,41 +308,28 @@ Available filters are:
         :adobe:        Adobe RGB (1998)
         :prophoto:     ProPhoto RGB (ROMM)
         :cie1931:      CIE 1931 RGB
-        :dci-p3:       DCI-P3 (Digital Cinema)
-        :v-gamut:      Panasonic V-Gamut primaries
 
-    ``<gamma>``
-       Gamma function the source file was encoded with. Normally this should be set
-       in the file header, but when playing broken or mistagged files this can be
-       used to override the setting.
+     ``<gamma>``
+        Gamma function the source file was encoded with. Normally this should be set
+        in the file header, but when playing broken or mistagged files this can be
+        used to override the setting.
 
-       This option only affects video output drivers that perform color management.
+        This option only affects video output drivers that perform color management.
 
-       If this option is set to ``auto`` (which is the default), the gamma will
-       be set to BT.1886 for YCbCr content, sRGB for RGB content and Linear for
-       XYZ content.
+        If this option is set to ``auto`` (which is the default), the gamma will
+        be set to BT.1886 for YCbCr content, sRGB for RGB content and Linear for
+        XYZ content.
 
-       Available gamma functions are:
+        Available gamma functions are:
 
-       :auto:         automatic selection (default)
-       :bt.1886:      ITU-R BT.1886 (EOTF corresponding to BT.601/BT.709/BT.2020)
-       :srgb:         IEC 61966-2-4 (sRGB)
-       :linear:       Linear light
-       :gamma1.8:     Pure power curve (gamma 1.8)
-       :gamma2.2:     Pure power curve (gamma 2.2)
-       :gamma2.8:     Pure power curve (gamma 2.8)
-       :prophoto:     ProPhoto RGB (ROMM) curve
-       :st2084:       SMPTE ST2084 (HDR) curve
-       :std-b67:      ARIB STD-B67 (Hybrid Log-gamma) curve
-       :v-log:        Panasonic V-Log transfer curve
-
-    ``<peak>``
-        Reference peak illumination for the video file. This is mostly
-        interesting for HDR, but it can also be used tone map SDR content
-        to a darker or brighter exposure.
-
-        The default of 0.0 will default to the display's reference brightness
-        for SDR and the source's reference brightness for HDR.
+        :auto:         automatic selection (default)
+        :bt.1886:      ITU-R BT.1886 (approximation of BT.601/BT.709/BT.2020 curve)
+        :srgb:         IEC 61966-2-4 (sRGB)
+        :linear:       Linear light
+        :gamma1.8:     Pure power curve (gamma 1.8)
+        :gamma2.2:     Pure power curve (gamma 2.2)
+        :gamma2.8:     Pure power curve (gamma 2.8)
+        :prophoto:     ProPhoto RGB (ROMM) curve
 
     ``<stereo-in>``
         Set the stereo mode the video is assumed to be encoded in. Takes the
@@ -451,8 +458,9 @@ Available filters are:
         generating an occasional mismatched frame, but it may also cause an
         excessive number of frames to be dropped during high motion sequences.
         Conversely, setting it to -1 will make ``pullup`` match fields more
-        easily. This may help process video with slight blurring between the
-        fields, but may also cause interlaced frames in the output.
+        easily. This may help processing of video where there is slight
+        blurring between the fields, but may also cause there to be interlaced
+        frames in the output.
 
     ``mp`` (metric plane)
         This option may be set to ``u`` or ``v`` to use a chroma plane instead of the
@@ -467,24 +475,25 @@ Available filters are:
 
     ``<mode>``
         :frame: Output 1 frame for each frame.
-        :field: Output 1 frame for each field (default).
+        :field: Output 1 frame for each field.
         :frame-nospatial: Like ``frame`` but skips spatial interlacing check.
         :field-nospatial: Like ``field`` but skips spatial interlacing check.
 
     ``<interlaced-only>``
-        :no:  Deinterlace all frames.
-        :yes: Only deinterlace frames marked as interlaced (default).
+        :no:  Deinterlace all frames (default).
+        :yes: Only deinterlace frames marked as interlaced (default if this
+              filter is inserted via ``deinterlace`` property).
 
-    This filter is automatically inserted when using the ``d`` key (or any
+    This filter, is automatically inserted when using the ``D`` key (or any
     other key that toggles the ``deinterlace`` property or when using the
     ``--deinterlace`` switch), assuming the video output does not have native
     deinterlacing support.
 
     If you just want to set the default mode, put this filter and its options
-    into ``--vf-defaults`` instead, and enable deinterlacing with ``d`` or
+    into ``--vf-defaults`` instead, and enable deinterlacing with ``D`` or
     ``--deinterlace``.
 
-    Also, note that the ``d`` key is stupid enough to insert a deinterlacer twice
+    Also note that the ``D`` key is stupid enough to insert an interlacer twice
     when inserting yadif with ``--vf``, so using the above methods is
     recommended.
 
@@ -656,11 +665,10 @@ Available filters are:
     ``buffered-frames``
         Maximum number of decoded video frames that should be buffered before
         the filter (default: 4). This specifies the maximum number of frames
-        the script can request in reverse direction.
-        E.g. if ``buffered-frames=5``, and the script just requested frame 15,
-        it can still request frame 10, but frame 9 is not available anymore.
-        If it requests frame 30, mpv will decode 15 more frames, and keep only
-        frames 25-30.
+        the script can requests backwards. E.g. if ``buffered-frames=5``, and
+        the script just requested frame 15, it can still request frame 10, but
+        frame 9 is not available anymore. If it requests frame 30, mpv will
+        decode 15 more frames, and keep only frames 25-30.
 
         The actual number of buffered frames also depends on the value of the
         ``concurrent-frames`` option. Currently, both option values are
@@ -733,7 +741,7 @@ Available filters are:
 ``vavpp``
     VA-AP-API video post processing. Works with ``--vo=vaapi`` and ``--vo=opengl``
     only. Currently deinterlaces. This filter is automatically inserted if
-    deinterlacing is requested (either using the ``d`` key, by default mapped to
+    deinterlacing is requested (either using the ``D`` key, by default mapped to
     the command ``cycle deinterlace``, or the ``--deinterlace`` option).
 
     ``deint=<method>``
@@ -757,7 +765,7 @@ Available filters are:
 ``vdpaupp``
     VDPAU video post processing. Works with ``--vo=vdpau`` and ``--vo=opengl``
     only. This filter is automatically inserted if deinterlacing is requested
-    (either using the ``d`` key, by default mapped to the command
+    (either using the ``D`` key, by default mapped to the command
     ``cycle deinterlace``, or the ``--deinterlace`` option). When enabling
     deinterlacing, it is always preferred over software deinterlacer filters
     if the ``vdpau`` VO is used, and also if ``opengl`` is used and hardware
@@ -806,23 +814,15 @@ Available filters are:
         1-9
             Apply high quality VDPAU scaling (needs capable hardware).
 
-``d3d11vpp``
-    Direct3D 11 video post processing. Currently requires D3D11 hardware
-    decoding for use.
-
-    ``deint=<yes|no>``
-        Whether deinterlacing is enabled (default: no).
-    ``interlaced-only=<yes|no>``
-        If ``yes`` (default), only deinterlace frames marked as interlaced.
-    ``mode=<blend|bob|adaptive|mocomp|ivctc|none>``
-        Tries to select a video processor with the given processing capability.
-        If a video processor supports multiple capabilities, it is not clear
-        which algorithm is actually selected. ``none`` always falls back. On
-        most if not all hardware, this option will probably do nothing, because
-        a video processor usually supports all modes or none.
+``vdpaurb``
+    VDPAU video read back. Works with ``--vo=vdpau`` and ``--vo=opengl`` only.
+    This filter will read back frames decoded by VDPAU so that other filters,
+    which are not normally compatible with VDPAU, can be used like normal.
+    This filter must be specified before ``vdpaupp`` in the filter chain if
+    ``vdpaupp`` is used.
 
 ``buffer=<num>``
     Buffer ``<num>`` frames in the filter chain. This filter is probably pretty
-    useless, except for debugging. (Note that this won't help to smooth out
+    useless, except for debugging. (Note that this won't help smoothing out
     latencies with decoding, because the filter will never output a frame if
     the buffer isn't full, except on EOF.)

@@ -39,17 +39,8 @@ def apply_plist_template(plist_file, version):
     for line in fileinput.input(plist_file, inplace=1):
         print (line.rstrip().replace('${VERSION}', version))
 
-def bundle_version():
-    if os.path.exists('VERSION'):
-        x = open('VERSION')
-        version = x.read()
-        x.close()
-    else:
-        version = sh("./version.sh").strip()
-    return version
-
 def main():
-    version = bundle_version().rstrip()
+    version = sh("./version.sh").strip()
 
     usage = "usage: %prog [options] arg"
     parser = OptionParser(usage)

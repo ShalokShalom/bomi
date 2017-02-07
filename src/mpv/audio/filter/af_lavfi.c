@@ -3,18 +3,18 @@
  *
  * Filter graph creation code taken from FFmpeg ffplay.c (LGPL 2.1 or later)
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -50,7 +50,6 @@
 #if LIBAVFILTER_VERSION_MICRO < 100
 #define graph_parse(graph, filters, inputs, outputs, log_ctx) \
     avfilter_graph_parse(graph, filters, inputs, outputs, log_ctx)
-#define avfilter_graph_send_command(a, b, c, d, e, f, g) -1
 #else
 #define graph_parse(graph, filters, inputs, outputs, log_ctx) \
     avfilter_graph_parse_ptr(graph, filters, &(inputs), &(outputs), log_ctx)
@@ -196,10 +195,6 @@ static int control(struct af_instance *af, int cmd, void *arg)
         if (af_to_avformat(in->format) == AV_SAMPLE_FMT_NONE)
             mp_audio_set_format(in, AF_FORMAT_FLOAT);
 
-        // Removing this requires fixing AVFrame.data vs. AVFrame.extended_data
-        if (in->channels.num > AV_NUM_DATA_POINTERS)
-            return AF_ERROR;
-
         if (!mp_chmap_is_lavc(&in->channels))
             mp_chmap_reorder_to_lavc(&in->channels); // will always work
 
@@ -216,20 +211,12 @@ static int control(struct af_instance *af, int cmd, void *arg)
         mp_chmap_from_lavc(&out_cm, l_out->channel_layout);
         mp_audio_set_channels(out, &out_cm);
 
-        if (!mp_audio_config_valid(out) || out->channels.num > AV_NUM_DATA_POINTERS)
+        if (!mp_audio_config_valid(out))
             return AF_ERROR;
 
         p->timebase_out = l_out->time_base;
 
         return mp_audio_config_equals(in, &orig_in) ? AF_OK : AF_FALSE;
-    }
-    case AF_CONTROL_COMMAND: {
-        if (!p->graph)
-            break;
-        char **args = arg;
-        return avfilter_graph_send_command(p->graph, "all",
-                                           args[0], args[1], &(char){0}, 0, 0)
-                >= 0 ? CONTROL_OK : CONTROL_ERROR;
     }
     case AF_CONTROL_GET_METADATA:
         if (p->metadata) {
@@ -246,7 +233,7 @@ static int control(struct af_instance *af, int cmd, void *arg)
 
 static void get_metadata_from_av_frame(struct af_instance *af, AVFrame *frame)
 {
-#if LIBAVUTIL_VERSION_MICRO >= 100
+#if HAVE_AVFRAME_METADATA
     struct priv *p = af->priv;
     if (!p->metadata)
         p->metadata = talloc_zero(p, struct mp_tags);
@@ -266,21 +253,32 @@ static int filter_frame(struct af_instance *af, struct mp_audio *data)
     if (!p->graph)
         goto error;
 
-    if (!data) {
-        if (p->eof)
-            return 0;
-        p->eof = true;
-    }
+    AVFilterLink *l_in = p->in->outputs[0];
 
     if (data) {
-        frame = mp_audio_to_avframe_and_unref(data);
-        data = NULL;
+        frame = av_frame_alloc();
         if (!frame)
             goto error;
 
+        frame->nb_samples = data->samples;
+        frame->format = l_in->format;
+
         // Timebase is 1/sample_rate
         frame->pts = p->samples_in;
-        p->samples_in += frame->nb_samples;
+
+        frame->channel_layout = l_in->channel_layout;
+        frame->sample_rate = l_in->sample_rate;
+#if LIBAVFILTER_VERSION_MICRO >= 100
+        // FFmpeg being a stupid POS
+        frame->channels = l_in->channels;
+#endif
+
+        frame->extended_data = frame->data;
+        for (int n = 0; n < data->num_planes; n++)
+            frame->data[n] = data->planes[n];
+        frame->linesize[0] = frame->nb_samples * data->sstride;
+
+        p->samples_in += data->samples;
     }
 
     if (av_buffersrc_add_frame(p->in, frame) < 0)
@@ -351,6 +349,8 @@ static int af_open(struct af_instance *af)
     af->uninit = uninit;
     af->filter_frame = filter_frame;
     af->filter_out = filter_out;
+    // Removing this requires fixing AVFrame.data vs. AVFrame.extended_data
+    assert(MP_NUM_CHANNELS <= AV_NUM_DATA_POINTERS);
     return AF_OK;
 }
 

@@ -22,10 +22,9 @@
 
 #include <libavutil/buffer.h>
 #include <libavutil/frame.h>
-#include <libavutil/mem.h>
 #include <libavutil/version.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "common/common.h"
 #include "fmt-conversion.h"
 #include "audio.h"
@@ -138,9 +137,6 @@ static void mp_audio_destructor(void *ptr)
  * available on every plane. The previous data is kept (for the smallest
  * common number of samples before/after resize).
  *
- * This also makes sure the resulting buffer is writable (even in the case
- * the buffer has the correct size).
- *
  * mpa->samples is not set or used.
  *
  * This function is flexible enough to handle format and channel layout
@@ -156,12 +152,6 @@ void mp_audio_realloc(struct mp_audio *mpa, int samples)
     int size = get_plane_size(mpa, samples);
     if (size < 0)
         abort(); // oom or invalid parameters
-    if (!mp_audio_is_writeable(mpa)) {
-        for (int n = 0; n < MP_NUM_CHANNELS; n++) {
-            av_buffer_unref(&mpa->allocated[n]);
-            mpa->planes[n] = NULL;
-        }
-    }
     for (int n = 0; n < mpa->num_planes; n++) {
         if (!mpa->allocated[n] || size != mpa->allocated[n]->size) {
             if (av_buffer_realloc(&mpa->allocated[n], size) < 0)
@@ -180,7 +170,7 @@ void mp_audio_realloc(struct mp_audio *mpa, int samples)
 // If the buffer is reallocated, also preallocate.
 void mp_audio_realloc_min(struct mp_audio *mpa, int samples)
 {
-    if (samples > mp_audio_get_allocated_size(mpa) || !mp_audio_is_writeable(mpa)) {
+    if (samples > mp_audio_get_allocated_size(mpa)) {
         size_t alloc = ta_calc_prealloc_elems(samples);
         if (alloc > INT_MAX)
             abort(); // oom
@@ -261,50 +251,7 @@ void mp_audio_skip_samples(struct mp_audio *data, int samples)
         data->planes[n] = (uint8_t *)data->planes[n] + samples * data->sstride;
 
     data->samples -= samples;
-
-    if (data->pts != MP_NOPTS_VALUE)
-        data->pts += samples / (double)data->rate;
 }
-
-// Return the timestamp of the sample just after the end of this frame.
-double mp_audio_end_pts(struct mp_audio *f)
-{
-    if (f->pts == MP_NOPTS_VALUE || f->rate < 1)
-        return MP_NOPTS_VALUE;
-    return f->pts + f->samples / (double)f->rate;
-}
-
-// Clip the given frame to the given timestamp range. Adjusts the frame size
-// and timestamp.
-void mp_audio_clip_timestamps(struct mp_audio *f, double start, double end)
-{
-    double f_end = mp_audio_end_pts(f);
-    if (f_end == MP_NOPTS_VALUE)
-        return;
-    if (end != MP_NOPTS_VALUE) {
-        if (f_end >= end) {
-            if (f->pts >= end) {
-                f->samples = 0;
-            } else {
-                int new = (end - f->pts) * f->rate;
-                f->samples = MPCLAMP(new, 0, f->samples);
-            }
-        }
-    }
-    if (start != MP_NOPTS_VALUE) {
-        if (f->pts < start) {
-            if (f_end <= start) {
-                f->samples = 0;
-                f->pts = f_end;
-            } else {
-                int skip = (start - f->pts) * f->rate;
-                skip = MPCLAMP(skip, 0, f->samples);
-                mp_audio_skip_samples(f, skip);
-            }
-        }
-    }
-}
-
 
 // Return false if the frame data is shared, true otherwise.
 // Will return true for non-refcounted frames.
@@ -356,9 +303,9 @@ struct mp_audio *mp_audio_from_avframe(struct AVFrame *avframe)
     mp_chmap_from_lavc(&lavc_chmap, avframe->channel_layout);
 
 #if LIBAVUTIL_VERSION_MICRO >= 100
-    // FFmpeg being stupid POS again
-    if (lavc_chmap.num != av_frame_get_channels(avframe))
-        mp_chmap_from_channels(&lavc_chmap, av_frame_get_channels(avframe));
+    // FFmpeg being special again
+    if (lavc_chmap.num != avframe->channels)
+        mp_chmap_from_channels(&lavc_chmap, avframe->channels);
 #endif
 
     new->rate = avframe->sample_rate;
@@ -376,23 +323,21 @@ struct mp_audio *mp_audio_from_avframe(struct AVFrame *avframe)
     }
 
     // If we can't handle the format (e.g. too many channels), bail out.
-    if (!mp_audio_config_valid(new))
+    if (!mp_audio_config_valid(new) || avframe->nb_extended_buf)
         goto fail;
 
-    for (int n = 0; n < AV_NUM_DATA_POINTERS + avframe->nb_extended_buf; n++) {
-        AVBufferRef *buf = n < AV_NUM_DATA_POINTERS ? avframe->buf[n]
-                            : avframe->extended_buf[n - AV_NUM_DATA_POINTERS];
-        if (!buf)
+    for (int n = 0; n < AV_NUM_DATA_POINTERS; n++) {
+        if (!avframe->buf[n])
             break;
         if (n >= MP_NUM_CHANNELS)
             goto fail;
-        new->allocated[n] = av_buffer_ref(buf);
+        new->allocated[n] = av_buffer_ref(avframe->buf[n]);
         if (!new->allocated[n])
             goto fail;
     }
 
     for (int n = 0; n < new->num_planes; n++)
-        new->planes[n] = avframe->extended_data[n];
+        new->planes[n] = avframe->data[n];
     new->samples = avframe->nb_samples;
 
     return new;
@@ -400,92 +345,6 @@ struct mp_audio *mp_audio_from_avframe(struct AVFrame *avframe)
 fail:
     talloc_free(new);
     av_frame_free(&tmp);
-    return NULL;
-}
-
-int mp_audio_to_avframe(struct mp_audio *frame, struct AVFrame *avframe)
-{
-    av_frame_unref(avframe);
-
-    avframe->nb_samples = frame->samples;
-    avframe->format = af_to_avformat(frame->format);
-    if (avframe->format == AV_SAMPLE_FMT_NONE)
-        goto fail;
-
-    avframe->channel_layout = mp_chmap_to_lavc(&frame->channels);
-    if (!avframe->channel_layout)
-        goto fail;
-#if LIBAVUTIL_VERSION_MICRO >= 100
-    // FFmpeg being a stupid POS again
-    av_frame_set_channels(avframe, frame->channels.num);
-#endif
-    avframe->sample_rate = frame->rate;
-
-    if (frame->num_planes > AV_NUM_DATA_POINTERS) {
-        avframe->extended_data =
-            av_mallocz_array(frame->num_planes, sizeof(avframe->extended_data[0]));
-        int extbufs = frame->num_planes - AV_NUM_DATA_POINTERS;
-        avframe->extended_buf =
-            av_mallocz_array(extbufs, sizeof(avframe->extended_buf[0]));
-        if (!avframe->extended_data || !avframe->extended_buf)
-            goto fail;
-        avframe->nb_extended_buf = extbufs;
-    }
-
-    for (int p = 0; p < frame->num_planes; p++)
-        avframe->extended_data[p] = frame->planes[p];
-    avframe->linesize[0] = frame->samples * frame->sstride;
-
-    for (int p = 0; p < AV_NUM_DATA_POINTERS; p++)
-        avframe->data[p] = avframe->extended_data[p];
-
-    for (int p = 0; p < frame->num_planes; p++) {
-        if (!frame->allocated[p])
-            break;
-        AVBufferRef *nref = av_buffer_ref(frame->allocated[p]);
-        if (!nref)
-            goto fail;
-        if (p < AV_NUM_DATA_POINTERS) {
-            avframe->buf[p] = nref;
-        } else {
-            avframe->extended_buf[p - AV_NUM_DATA_POINTERS] = nref;
-        }
-    }
-
-    // Force refcounted frame.
-    if (!avframe->buf[0]) {
-        AVFrame *tmp = av_frame_alloc();
-        if (!tmp)
-            goto fail;
-        if (av_frame_ref(tmp, avframe) < 0)
-            goto fail;
-        av_frame_free(&avframe);
-        avframe = tmp;
-    }
-
-    return 0;
-
-fail:
-    av_frame_unref(avframe);
-    return -1;
-}
-
-// Returns NULL on failure. The input is always unreffed.
-struct AVFrame *mp_audio_to_avframe_and_unref(struct mp_audio *frame)
-{
-    struct AVFrame *avframe = av_frame_alloc();
-    if (!avframe)
-        goto fail;
-
-    if (mp_audio_to_avframe(frame, avframe) < 0)
-        goto fail;
-
-    talloc_free(frame);
-    return avframe;
-
-fail:
-    av_frame_free(&avframe);
-    talloc_free(frame);
     return NULL;
 }
 

@@ -5,60 +5,42 @@
 
 #include "osd.h"
 
-enum mp_osdtype {
-    OSDTYPE_SUB,
-    OSDTYPE_SUB2, // IDs must be numerically successive
-
-    OSDTYPE_OSD,
-
-    OSDTYPE_EXTERNAL,
-    OSDTYPE_EXTERNAL2,
-
-    OSDTYPE_COUNT
-};
-
-struct ass_state {
-    struct mp_log *log;
-    struct ass_track *track;
-    struct ass_renderer *render;
-    struct ass_library *library;
-};
+#define OSD_CONV_CACHE_MAX 4
 
 struct osd_object {
     int type; // OSDTYPE_*
     bool is_sub;
 
-    // OSDTYPE_OSD
-    bool osd_changed;
+    bool force_redraw;
+
+    // OSDTYPE_SUB/OSDTYPE_SUB2/OSDTYPE_OSD/OSDTYPE_EXTERNAL
     char *text;
+
+    // OSDTYPE_PROGBAR
     struct osd_progbar_state progbar_state;
 
     // OSDTYPE_SUB/OSDTYPE_SUB2
-    struct dec_sub *sub;
+    struct osd_sub_state sub_state;
 
     // OSDTYPE_EXTERNAL
-    struct osd_external *externals;
-    int num_externals;
+    int external_res_x, external_res_y;
 
     // OSDTYPE_EXTERNAL2
     struct sub_bitmaps *external2;
+
+    // caches for OSD conversion (internal to render_object())
+    struct osd_conv_cache *cache[OSD_CONV_CACHE_MAX];
+    struct sub_bitmaps cached;
 
     // VO cache state
     int vo_change_id;
     struct mp_osd_res vo_res;
 
     // Internally used by osd_libass.c
-    bool changed;
-    struct ass_state ass;
-    struct mp_ass_packer *ass_packer;
-    struct ass_image **ass_imgs;
-};
-
-struct osd_external {
-    void *id;
-    char *text;
-    int res_x, res_y;
-    struct ass_state ass;
+    struct sub_bitmap *parts_cache;
+    struct ass_track *osd_track;
+    struct ass_renderer *osd_render;
+    struct ass_library *osd_ass_library;
 };
 
 struct osd_state {
@@ -67,10 +49,8 @@ struct osd_state {
     struct osd_object *objs[MAX_OSD_PARTS];
 
     bool render_subs_in_filter;
-    double force_video_pts;
 
     bool want_redraw;
-    bool want_redraw_notification;
 
     struct MPOpts *opts;
     struct mpv_global *global;
@@ -78,11 +58,5 @@ struct osd_state {
 
     struct mp_draw_sub_cache *draw_cache;
 };
-
-// defined in osd_libass.c and osd_dummy.c
-void osd_object_get_bitmaps(struct osd_state *osd, struct osd_object *obj,
-                            int format, struct sub_bitmaps *out_imgs);
-void osd_init_backend(struct osd_state *osd);
-void osd_destroy_backend(struct osd_state *osd);
 
 #endif

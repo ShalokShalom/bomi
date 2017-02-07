@@ -25,21 +25,19 @@
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void));
 
 typedef struct {
-    char use_cs;
-    union {
-        SRWLOCK srw;
-        CRITICAL_SECTION cs;
-    } lock;
+    char static_mutex;
+    INIT_ONCE static_init;
+    CRITICAL_SECTION cs;
 } pthread_mutex_t;
 
-// Assume SRWLOCK_INIT is {0} so we can easily remain C89-compatible.
-#define PTHREAD_MUTEX_INITIALIZER {0}
+#define PTHREAD_MUTEX_INITIALIZER {1, INIT_ONCE_STATIC_INIT}
 
 #define pthread_mutexattr_t int
 #define pthread_mutexattr_destroy(attr) (void)0
 #define pthread_mutexattr_init(attr) (*(attr) = 0)
-#define pthread_mutexattr_settype(attr, type) (*(attr) = (type))
-#define PTHREAD_MUTEX_RECURSIVE 1
+#define pthread_mutexattr_settype(attr, type) (void)0
+// CRITICAL_SECTION is always recursive
+#define PTHREAD_MUTEX_RECURSIVE 0
 
 int pthread_mutex_destroy(pthread_mutex_t *mutex);
 int pthread_mutex_init(pthread_mutex_t *restrict mutex,

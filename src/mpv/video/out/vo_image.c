@@ -27,9 +27,8 @@
 #include "config.h"
 #include "misc/bstr.h"
 #include "osdep/io.h"
-#include "options/m_config.h"
 #include "options/path.h"
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "common/common.h"
 #include "common/msg.h"
 #include "video/out/vo.h"
@@ -41,30 +40,9 @@
 #include "sub/osd.h"
 #include "options/m_option.h"
 
-static const struct m_sub_options image_writer_conf = {
-    .opts = image_writer_opts,
-    .size = sizeof(struct image_writer_opts),
-    .defaults = &image_writer_opts_defaults,
-};
-
-struct vo_image_opts {
+struct priv {
     struct image_writer_opts *opts;
     char *outdir;
-};
-
-#define OPT_BASE_STRUCT struct vo_image_opts
-
-static const struct m_sub_options vo_image_conf = {
-    .opts = (const struct m_option[]) {
-        OPT_SUBSTRUCT("vo-image", opts, image_writer_conf, 0),
-        OPT_STRING("vo-image-outdir", outdir, 0),
-        {0},
-    },
-    .size = sizeof(struct vo_image_opts),
-};
-
-struct priv {
-    struct vo_image_opts *opts;
 
     struct mp_image *current;
     int frame;
@@ -86,7 +64,7 @@ static bool checked_mkdir(struct vo *vo, const char *buf)
     return true;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params)
+static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
 {
     struct priv *p = vo->priv;
     mp_image_unrefp(&p->current);
@@ -114,13 +92,13 @@ static void flip_page(struct vo *vo)
 
     void *t = talloc_new(NULL);
     char *filename = talloc_asprintf(t, "%08d.%s", p->frame,
-                                     image_writer_file_ext(p->opts->opts));
+                                     image_writer_file_ext(p->opts));
 
-    if (p->opts->outdir && strlen(p->opts->outdir))
-        filename = mp_path_join(t, p->opts->outdir, filename);
+    if (p->outdir && strlen(p->outdir))
+        filename = mp_path_join(t, p->outdir, filename);
 
     MP_INFO(vo, "Saving %s\n", filename);
-    write_image(p->current, p->opts->opts, filename, vo->log);
+    write_image(p->current, p->opts, filename, vo->log);
 
     talloc_free(t);
     mp_image_unrefp(&p->current);
@@ -143,8 +121,7 @@ static void uninit(struct vo *vo)
 static int preinit(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    p->opts = mp_get_config_group(vo, vo->global, &vo_image_conf);
-    if (p->opts->outdir && !checked_mkdir(vo, p->opts->outdir))
+    if (p->outdir && !checked_mkdir(vo, p->outdir))
         return -1;
     return 0;
 }
@@ -154,12 +131,19 @@ static int control(struct vo *vo, uint32_t request, void *data)
     return VO_NOTIMPL;
 }
 
+#define OPT_BASE_STRUCT struct priv
+
 const struct vo_driver video_out_image =
 {
     .description = "Write video frames to image files",
     .name = "image",
     .untimed = true,
     .priv_size = sizeof(struct priv),
+    .options = (const struct m_option[]) {
+        OPT_SUBSTRUCT("", opts, image_writer_conf, 0),
+        OPT_STRING("outdir", outdir, 0),
+        {0},
+    },
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,
@@ -167,5 +151,4 @@ const struct vo_driver video_out_image =
     .draw_image = draw_image,
     .flip_page = flip_page,
     .uninit = uninit,
-    .global_opts = &vo_image_conf,
 };

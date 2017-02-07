@@ -17,7 +17,7 @@
 
 #include <stdio.h>
 #include <pthread.h>
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "common/msg.h"
 #include "input/input.h"
@@ -50,7 +50,7 @@ static pthread_t playback_thread_id;
                                  child:(NSMenu *)child;
 - (void)registerMenuItem:(NSMenuItem*)menuItem forKey:(MPMenuKey)key;
 - (NSMenu *)appleMenuWithMainMenu:(NSMenu *)mainMenu;
-- (NSMenu *)videoMenu;
+- (NSMenu *)movieMenu;
 - (NSMenu *)windowMenu;
 @end
 
@@ -117,15 +117,17 @@ static void terminate_cocoa_application(void)
     [self mainMenuItemWithParent:mainMenu child:menu];
     [self menuItemWithParent:menu title:@"Hide mpv"
                       action:@selector(hide:) keyEquivalent: @"h"];
-    [menu addItem:[NSMenuItem separatorItem]];
     [self menuItemWithParent:menu title:@"Quit mpv"
                       action:@selector(stopPlayback) keyEquivalent: @"q"];
+    [self menuItemWithParent:menu title:@"Quit mpv & remember position"
+                      action:@selector(stopPlaybackAndRememberPosition)
+               keyEquivalent: @"Q"];
     return [menu autorelease];
 }
 
-- (NSMenu *)videoMenu
+- (NSMenu *)movieMenu
 {
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Video"];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Movie"];
     _R(menu, @"Half Size",   @"0", MPM_H_SIZE)
     _R(menu, @"Normal Size", @"1", MPM_N_SIZE)
     _R(menu, @"Double Size", @"2", MPM_D_SIZE)
@@ -146,7 +148,7 @@ static void terminate_cocoa_application(void)
     [NSApp setMainMenu:main_menu];
     [NSApp setAppleMenu:[self appleMenuWithMainMenu:main_menu]];
 
-    [NSApp mainMenuItemWithParent:main_menu child:[self videoMenu]];
+    [NSApp mainMenuItemWithParent:main_menu child:[self movieMenu]];
     [NSApp mainMenuItemWithParent:main_menu child:[self windowMenu]];
 }
 
@@ -159,7 +161,7 @@ static void terminate_cocoa_application(void)
 
 - (void)stopPlaybackAndRememberPosition
 {
-    [self stopMPV:"quit-watch-later"];
+    [self stopMPV:"quit_watch_later"];
 }
 
 - (void)stopMPV:(char *)cmd
@@ -206,8 +208,7 @@ static void terminate_cocoa_application(void)
     return [item autorelease];
 }
 
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)theApp
-{
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)theApp {
     return NSTerminateNow;
 }
 

@@ -2,18 +2,23 @@
  * This file is part of mpv.
  * Parts based on MPlayer code by Reimar Döffinger.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * You can alternatively redistribute this file and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  */
 
 #include <stddef.h>
@@ -23,8 +28,8 @@
 #include <stdarg.h>
 #include <assert.h>
 
+#include "stream/stream.h"
 #include "common/common.h"
-#include "formats.h"
 #include "utils.h"
 
 // GLU has this as gluErrorString (we don't use GLU, as it is legacy-OpenGL)
@@ -40,7 +45,7 @@ static const char *gl_error_to_string(GLenum error)
     }
 }
 
-void gl_check_error(GL *gl, struct mp_log *log, const char *info)
+void glCheckError(GL *gl, struct mp_log *log, const char *info)
 {
     for (;;) {
         GLenum error = gl->GetError();
@@ -49,6 +54,52 @@ void gl_check_error(GL *gl, struct mp_log *log, const char *info)
         mp_msg(log, MSGL_ERR, "%s: OpenGL error %s.\n", info,
                gl_error_to_string(error));
     }
+}
+
+// return the number of bytes per pixel for the given format
+// does not handle all possible variants, just those used by mpv
+int glFmt2bpp(GLenum format, GLenum type)
+{
+    int component_size = 0;
+    switch (type) {
+    case GL_UNSIGNED_BYTE_3_3_2:
+    case GL_UNSIGNED_BYTE_2_3_3_REV:
+        return 1;
+    case GL_UNSIGNED_SHORT_5_5_5_1:
+    case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+    case GL_UNSIGNED_SHORT_5_6_5:
+    case GL_UNSIGNED_SHORT_5_6_5_REV:
+        return 2;
+    case GL_UNSIGNED_BYTE:
+        component_size = 1;
+        break;
+    case GL_UNSIGNED_SHORT:
+        component_size = 2;
+        break;
+    }
+    switch (format) {
+    case GL_LUMINANCE:
+    case GL_ALPHA:
+        return component_size;
+    case GL_RGB_422_APPLE:
+        return 2;
+    case GL_RGB:
+    case GL_BGR:
+    case GL_RGB_INTEGER:
+        return 3 * component_size;
+    case GL_RGBA:
+    case GL_BGRA:
+    case GL_RGBA_INTEGER:
+        return 4 * component_size;
+    case GL_RED:
+    case GL_RED_INTEGER:
+        return component_size;
+    case GL_RG:
+    case GL_LUMINANCE_ALPHA:
+    case GL_RG_INTEGER:
+        return 2 * component_size;
+    }
+    abort(); // unknown
 }
 
 static int get_alignment(int stride)
@@ -67,26 +118,28 @@ static int get_alignment(int stride)
 //  format, type: texture parameters
 //  dataptr, stride: image data
 //  x, y, width, height: part of the image to upload
-void gl_upload_tex(GL *gl, GLenum target, GLenum format, GLenum type,
-                   const void *dataptr, int stride,
-                   int x, int y, int w, int h)
+//  slice: height of an upload slice, 0 for all at once
+void glUploadTex(GL *gl, GLenum target, GLenum format, GLenum type,
+                 const void *dataptr, int stride,
+                 int x, int y, int w, int h, int slice)
 {
-    int bpp = gl_bytes_per_pixel(format, type);
     const uint8_t *data = dataptr;
     int y_max = y + h;
-    if (w <= 0 || h <= 0 || !bpp)
+    if (w <= 0 || h <= 0)
         return;
+    if (slice <= 0)
+        slice = h;
     if (stride < 0) {
         data += (h - 1) * stride;
         stride = -stride;
     }
     gl->PixelStorei(GL_UNPACK_ALIGNMENT, get_alignment(stride));
-    int slice = h;
-    if (gl->mpgl_caps & MPGL_CAP_ROW_LENGTH) {
+    bool use_rowlength = slice > 1 && (gl->mpgl_caps & MPGL_CAP_ROW_LENGTH);
+    if (use_rowlength) {
         // this is not always correct, but should work for MPlayer
-        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, stride / bpp);
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, stride / glFmt2bpp(format, type));
     } else {
-        if (stride != bpp * w)
+        if (stride != glFmt2bpp(format, type) * w)
             slice = 1; // very inefficient, but at least it works
     }
     for (; y + slice <= y_max; y += slice) {
@@ -95,29 +148,54 @@ void gl_upload_tex(GL *gl, GLenum target, GLenum format, GLenum type,
     }
     if (y < y_max)
         gl->TexSubImage2D(target, 0, x, y, w, y_max - y, format, type, data);
-    if (gl->mpgl_caps & MPGL_CAP_ROW_LENGTH)
+    if (use_rowlength)
         gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     gl->PixelStorei(GL_UNPACK_ALIGNMENT, 4);
 }
 
-mp_image_t *gl_read_window_contents(GL *gl, int w, int h)
+// Like glUploadTex, but upload a byte array with all elements set to val.
+// If scratch is not NULL, points to a resizeable talloc memory block than can
+// be freely used by the function (for avoiding temporary memory allocations).
+void glClearTex(GL *gl, GLenum target, GLenum format, GLenum type,
+                int x, int y, int w, int h, uint8_t val, void **scratch)
+{
+    int bpp = glFmt2bpp(format, type);
+    int stride = w * bpp;
+    int size = h * stride;
+    if (size < 1)
+        return;
+    void *data = scratch ? *scratch : NULL;
+    if (talloc_get_size(data) < size)
+        data = talloc_realloc(NULL, data, char *, size);
+    memset(data, val, size);
+    gl->PixelStorei(GL_UNPACK_ALIGNMENT, get_alignment(stride));
+    gl->TexSubImage2D(target, 0, x, y, w, h, format, type, data);
+    gl->PixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    if (scratch) {
+        *scratch = data;
+    } else {
+        talloc_free(data);
+    }
+}
+
+mp_image_t *glGetWindowScreenshot(GL *gl)
 {
     if (gl->es)
         return NULL; // ES can't read from front buffer
-    mp_image_t *image = mp_image_alloc(IMGFMT_RGB24, w, h);
+    GLint vp[4]; //x, y, w, h
+    gl->GetIntegerv(GL_VIEWPORT, vp);
+    mp_image_t *image = mp_image_alloc(IMGFMT_RGB24, vp[2], vp[3]);
     if (!image)
         return NULL;
-    gl->BindFramebuffer(GL_FRAMEBUFFER, gl->main_fb);
-    GLenum obj = gl->main_fb ? GL_COLOR_ATTACHMENT0 : GL_FRONT;
     gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
-    gl->ReadBuffer(obj);
+    gl->ReadBuffer(GL_FRONT);
     //flip image while reading (and also avoid stride-related trouble)
-    for (int y = 0; y < h; y++) {
-        gl->ReadPixels(0, h - y - 1, w, 1, GL_RGB, GL_UNSIGNED_BYTE,
+    for (int y = 0; y < vp[3]; y++) {
+        gl->ReadPixels(vp[0], vp[1] + vp[3] - y - 1, vp[2], 1,
+                       GL_RGB, GL_UNSIGNED_BYTE,
                        image->planes[0] + y * image->stride[0]);
     }
     gl->PixelStorei(GL_PACK_ALIGNMENT, 4);
-    gl->BindFramebuffer(GL_FRAMEBUFFER, 0);
     return image;
 }
 
@@ -257,59 +335,45 @@ bool fbotex_change(struct fbotex *fbo, GL *gl, struct mp_log *log, int w, int h,
 
     int cw = w, ch = h;
 
-    if ((flags & FBOTEX_FUZZY_W) && cw < fbo->rw)
-        cw = fbo->rw;
-    if ((flags & FBOTEX_FUZZY_H) && ch < fbo->rh)
-        ch = fbo->rh;
+    if ((flags & FBOTEX_FUZZY_W) && cw < fbo->w)
+        cw = fbo->w;
+    if ((flags & FBOTEX_FUZZY_H) && ch < fbo->h)
+        ch = fbo->h;
 
-    if (fbo->rw == cw && fbo->rh == ch && fbo->iformat == iformat) {
-        fbo->lw = w;
-        fbo->lh = h;
-        fbotex_invalidate(fbo);
+    if (fbo->w == cw && fbo->h == ch && fbo->iformat == iformat)
         return true;
-    }
-
-    int lw = w, lh = h;
 
     if (flags & FBOTEX_FUZZY_W)
         w = MP_ALIGN_UP(w, 256);
     if (flags & FBOTEX_FUZZY_H)
         h = MP_ALIGN_UP(h, 256);
 
-    mp_verbose(log, "Create FBO: %dx%d (%dx%d)\n", lw, lh, w, h);
-
-    const struct gl_format *format = gl_find_internal_format(gl, iformat);
-    if (!format || (format->flags & F_CF) != F_CF) {
-        mp_verbose(log, "Format 0x%x not supported.\n", (unsigned)iformat);
-        return false;
-    }
-    assert(gl->mpgl_caps & MPGL_CAP_FB);
-
     GLenum filter = fbo->tex_filter;
-
-    fbotex_uninit(fbo);
 
     *fbo = (struct fbotex) {
         .gl = gl,
-        .rw = w,
-        .rh = h,
-        .lw = lw,
-        .lh = lh,
+        .w = w,
+        .h = h,
         .iformat = iformat,
     };
+
+    mp_verbose(log, "Create FBO: %dx%d\n", fbo->w, fbo->h);
+
+    if (!(gl->mpgl_caps & MPGL_CAP_FB))
+        return false;
 
     gl->GenFramebuffers(1, &fbo->fbo);
     gl->GenTextures(1, &fbo->texture);
     gl->BindTexture(GL_TEXTURE_2D, fbo->texture);
-    gl->TexImage2D(GL_TEXTURE_2D, 0, format->internal_format, fbo->rw, fbo->rh, 0,
-                   format->format, format->type, NULL);
+    gl->TexImage2D(GL_TEXTURE_2D, 0, iformat, fbo->w, fbo->h, 0,
+                   GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     gl->BindTexture(GL_TEXTURE_2D, 0);
 
     fbotex_set_filter(fbo, filter ? filter : GL_LINEAR);
 
-    gl_check_error(gl, log, "after creating framebuffer texture");
+    glCheckError(gl, log, "after creating framebuffer texture");
 
     gl->BindFramebuffer(GL_FRAMEBUFFER, fbo->fbo);
     gl->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -324,7 +388,7 @@ bool fbotex_change(struct fbotex *fbo, GL *gl, struct mp_log *log, int w, int h,
 
     gl->BindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    gl_check_error(gl, log, "after creating framebuffer");
+    glCheckError(gl, log, "after creating framebuffer");
 
     return res;
 }
@@ -353,20 +417,6 @@ void fbotex_uninit(struct fbotex *fbo)
     }
 }
 
-// Mark framebuffer contents as unneeded.
-void fbotex_invalidate(struct fbotex *fbo)
-{
-    GL *gl = fbo->gl;
-
-    if (!fbo->fbo || !gl->InvalidateFramebuffer)
-        return;
-
-    gl->BindFramebuffer(GL_FRAMEBUFFER, fbo->fbo);
-    gl->InvalidateFramebuffer(GL_FRAMEBUFFER, 1,
-                              (GLenum[]){GL_COLOR_ATTACHMENT0});
-    gl->BindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
 // Standard parallel 2D projection, except y1 < y0 means that the coordinate
 // system is flipped, not the projection.
 void gl_transform_ortho(struct gl_transform *t, float x0, float x1,
@@ -384,18 +434,6 @@ void gl_transform_ortho(struct gl_transform *t, float x0, float x1,
     t->m[1][1] = 2.0f / (y1 - y0);
     t->t[0] = -(x1 + x0) / (x1 - x0);
     t->t[1] = -(y1 + y0) / (y1 - y0);
-}
-
-// Apply the effects of one transformation to another, transforming it in the
-// process. In other words: post-composes t onto x
-void gl_transform_trans(struct gl_transform t, struct gl_transform *x)
-{
-    struct gl_transform xt = *x;
-    x->m[0][0] = t.m[0][0] * xt.m[0][0] + t.m[0][1] * xt.m[1][0];
-    x->m[1][0] = t.m[1][0] * xt.m[0][0] + t.m[1][1] * xt.m[1][0];
-    x->m[0][1] = t.m[0][0] * xt.m[0][1] + t.m[0][1] * xt.m[1][1];
-    x->m[1][1] = t.m[1][0] * xt.m[0][1] + t.m[1][1] * xt.m[1][1];
-    gl_transform_vec(t, &x->t[0], &x->t[1]);
 }
 
 static void GLAPIENTRY gl_debug_cb(GLenum source, GLenum type, GLuint id,
@@ -416,12 +454,18 @@ static void GLAPIENTRY gl_debug_cb(GLenum source, GLenum type, GLuint id,
 
 void gl_set_debug_logger(GL *gl, struct mp_log *log)
 {
-    if (gl->DebugMessageCallback)
-        gl->DebugMessageCallback(log ? gl_debug_cb : NULL, log);
+    if (gl->DebugMessageCallback) {
+        if (log) {
+            gl->DebugMessageCallback(gl_debug_cb, log);
+        } else {
+            gl->DebugMessageCallback(NULL, NULL);
+        }
+    }
 }
 
-// Force cache flush if more than this number of shaders is created.
-#define SC_MAX_ENTRIES 48
+#define SC_ENTRIES 16
+#define SC_UNIFORM_ENTRIES 20
+#define SC_FILE_ENTRIES 10
 
 enum uniform_type {
     UT_invalid,
@@ -430,117 +474,79 @@ enum uniform_type {
     UT_m,
 };
 
-union uniform_val {
-    GLfloat f[9];
-    GLint i[4];
-};
-
 struct sc_uniform {
     char *name;
     enum uniform_type type;
     const char *glsl_type;
     int size;
     GLint loc;
-    union uniform_val v;
-    // Set for sampler uniforms.
-    GLenum tex_target;
-    GLuint tex_handle;
+    union {
+        GLfloat f[9];
+        GLint i[4];
+    } v;
 };
 
-struct sc_cached_uniform {
-    GLint loc;
-    union uniform_val v;
+struct sc_file {
+    char *path;
+    char *body;
 };
 
 struct sc_entry {
     GLuint gl_shader;
-    struct sc_cached_uniform *uniforms;
-    int num_uniforms;
-    bstr frag;
-    bstr vert;
+    // the following fields define the shader's contents
+    char *key; // vertex+frag shader (mangled)
     struct gl_vao *vao;
 };
 
 struct gl_shader_cache {
     GL *gl;
     struct mp_log *log;
+    struct mpv_global *global;
 
-    // permanent
-    char **exts;
-    int num_exts;
-
-    // this is modified during use (gl_sc_add() etc.) and reset for each shader
-    bstr prelude_text;
-    bstr header_text;
-    bstr text;
-    int next_texture_unit;
+    // this is modified during use (gl_sc_add() etc.)
+    char *text;
+    char *header_text;
     struct gl_vao *vao;
 
-    struct sc_entry *entries;
+    struct sc_entry entries[SC_ENTRIES];
     int num_entries;
 
-    struct sc_uniform *uniforms;
+    struct sc_uniform uniforms[SC_UNIFORM_ENTRIES];
     int num_uniforms;
 
-    // For checking that the user is calling gl_sc_reset() properly.
-    bool needs_reset;
-
-    bool error_state; // true if an error occurred
-
-    // temporary buffers (avoids frequent reallocations)
-    bstr tmp[5];
+    struct sc_file files[SC_FILE_ENTRIES];
+    int num_files;
 };
 
-struct gl_shader_cache *gl_sc_create(GL *gl, struct mp_log *log)
+struct gl_shader_cache *gl_sc_create(GL *gl, struct mp_log *log,
+                                     struct mpv_global *global)
 {
     struct gl_shader_cache *sc = talloc_ptrtype(NULL, sc);
     *sc = (struct gl_shader_cache){
         .gl = gl,
         .log = log,
+        .global = global,
+        .text = talloc_strdup(sc, ""),
+        .header_text = talloc_strdup(sc, ""),
     };
-    gl_sc_reset(sc);
     return sc;
 }
 
-// Reset the previous pass. This must be called after
-// Unbind all GL state managed by sc - the current program and texture units.
 void gl_sc_reset(struct gl_shader_cache *sc)
 {
-    GL *gl = sc->gl;
-
-    if (sc->needs_reset) {
-        gl->UseProgram(0);
-
-        for (int n = 0; n < sc->num_uniforms; n++) {
-            struct sc_uniform *u = &sc->uniforms[n];
-            if (u->type == UT_i && u->tex_target) {
-                gl->ActiveTexture(GL_TEXTURE0 + u->v.i[0]);
-                gl->BindTexture(u->tex_target, 0);
-            }
-        }
-        gl->ActiveTexture(GL_TEXTURE0);
-    }
-
-    sc->prelude_text.len = 0;
-    sc->header_text.len = 0;
-    sc->text.len = 0;
+    sc->text[0] = '\0';
+    sc->header_text[0] = '\0';
     for (int n = 0; n < sc->num_uniforms; n++)
         talloc_free(sc->uniforms[n].name);
     sc->num_uniforms = 0;
-    sc->next_texture_unit = 1; // not 0, as 0 is "free for use"
-    sc->needs_reset = false;
 }
 
 static void sc_flush_cache(struct gl_shader_cache *sc)
 {
-    MP_VERBOSE(sc, "flushing shader cache\n");
-
     for (int n = 0; n < sc->num_entries; n++) {
         struct sc_entry *e = &sc->entries[n];
         sc->gl->DeleteProgram(e->gl_shader);
-        talloc_free(e->vert.start);
-        talloc_free(e->frag.start);
-        talloc_free(e->uniforms);
+        talloc_free(e->key);
     }
     sc->num_entries = 0;
 }
@@ -554,56 +560,59 @@ void gl_sc_destroy(struct gl_shader_cache *sc)
     talloc_free(sc);
 }
 
-bool gl_sc_error_state(struct gl_shader_cache *sc)
-{
-    return sc->error_state;
-}
-
-void gl_sc_reset_error(struct gl_shader_cache *sc)
-{
-    sc->error_state = false;
-}
-
-void gl_sc_enable_extension(struct gl_shader_cache *sc, char *name)
-{
-    for (int n = 0; n < sc->num_exts; n++) {
-        if (strcmp(sc->exts[n], name) == 0)
-            return;
-    }
-    MP_TARRAY_APPEND(sc, sc->exts, sc->num_exts, talloc_strdup(sc, name));
-}
-
-#define bstr_xappend0(sc, b, s) bstr_xappend(sc, b, bstr0(s))
-
 void gl_sc_add(struct gl_shader_cache *sc, const char *text)
 {
-    bstr_xappend0(sc, &sc->text, text);
+    sc->text = talloc_strdup_append(sc->text, text);
 }
 
 void gl_sc_addf(struct gl_shader_cache *sc, const char *textf, ...)
 {
     va_list ap;
     va_start(ap, textf);
-    bstr_xappend_vasprintf(sc, &sc->text, textf, ap);
+    ta_xvasprintf_append(&sc->text, textf, ap);
     va_end(ap);
 }
 
 void gl_sc_hadd(struct gl_shader_cache *sc, const char *text)
 {
-    bstr_xappend0(sc, &sc->header_text, text);
+    sc->header_text = talloc_strdup_append(sc->header_text, text);
 }
 
 void gl_sc_haddf(struct gl_shader_cache *sc, const char *textf, ...)
 {
     va_list ap;
     va_start(ap, textf);
-    bstr_xappend_vasprintf(sc, &sc->header_text, textf, ap);
+    ta_xvasprintf_append(&sc->header_text, textf, ap);
     va_end(ap);
 }
 
-void gl_sc_hadd_bstr(struct gl_shader_cache *sc, struct bstr text)
+const char *gl_sc_loadfile(struct gl_shader_cache *sc, const char *path)
 {
-    bstr_xappend(sc, &sc->header_text, text);
+    if (!path || !path[0] || !sc->global)
+        return NULL;
+    for (int n = 0; n < sc->num_files; n++) {
+        if (strcmp(sc->files[n].path, path) == 0)
+            return sc->files[n].body;
+    }
+    // not found -> load it
+    if (sc->num_files == SC_FILE_ENTRIES) {
+        // empty cache when it overflows
+        for (int n = 0; n < sc->num_files; n++) {
+            talloc_free(sc->files[n].path);
+            talloc_free(sc->files[n].body);
+        }
+        sc->num_files = 0;
+    }
+    struct bstr s = stream_read_file(path, sc, sc->global, 100000); // 100 kB
+    if (s.len) {
+        struct sc_file *new = &sc->files[sc->num_files++];
+        *new = (struct sc_file) {
+            .path = talloc_strdup(sc, path),
+            .body = s.start
+        };
+        return new->body;
+    }
+    return NULL;
 }
 
 static struct sc_uniform *find_uniform(struct gl_shader_cache *sc,
@@ -614,12 +623,10 @@ static struct sc_uniform *find_uniform(struct gl_shader_cache *sc,
             return &sc->uniforms[n];
     }
     // not found -> add it
-    struct sc_uniform new = {
-        .loc = -1,
-        .name = talloc_strdup(NULL, name),
-    };
-    MP_TARRAY_APPEND(sc, sc->uniforms, sc->num_uniforms, new);
-    return &sc->uniforms[sc->num_uniforms - 1];
+    assert(sc->num_uniforms < SC_UNIFORM_ENTRIES); // just don't have too many
+    struct sc_uniform *new = &sc->uniforms[sc->num_uniforms++];
+    *new = (struct sc_uniform) { .loc = -1, .name = talloc_strdup(NULL, name) };
+    return new;
 }
 
 const char* mp_sampler_type(GLenum texture_target)
@@ -628,13 +635,11 @@ const char* mp_sampler_type(GLenum texture_target)
     case GL_TEXTURE_1D:         return "sampler1D";
     case GL_TEXTURE_2D:         return "sampler2D";
     case GL_TEXTURE_RECTANGLE:  return "sampler2DRect";
-    case GL_TEXTURE_EXTERNAL_OES: return "samplerExternalOES";
     case GL_TEXTURE_3D:         return "sampler3D";
     default: abort();
     }
 }
 
-// gl_sc_uniform_tex() should be preferred.
 void gl_sc_uniform_sampler(struct gl_shader_cache *sc, char *name, GLenum target,
                            int unit)
 {
@@ -643,31 +648,6 @@ void gl_sc_uniform_sampler(struct gl_shader_cache *sc, char *name, GLenum target
     u->size = 1;
     u->glsl_type = mp_sampler_type(target);
     u->v.i[0] = unit;
-    u->tex_target = 0;
-    u->tex_handle = 0;
-}
-
-void gl_sc_uniform_tex(struct gl_shader_cache *sc, char *name, GLenum target,
-                       GLuint texture)
-{
-    struct sc_uniform *u = find_uniform(sc, name);
-    u->type = UT_i;
-    u->size = 1;
-    u->glsl_type = mp_sampler_type(target);
-    u->v.i[0] = sc->next_texture_unit++;
-    u->tex_target = target;
-    u->tex_handle = texture;
-}
-
-void gl_sc_uniform_tex_ui(struct gl_shader_cache *sc, char *name, GLuint texture)
-{
-    struct sc_uniform *u = find_uniform(sc, name);
-    u->type = UT_i;
-    u->size = 1;
-    u->glsl_type = sc->gl->es ? "highp usampler2D" : "usampler2D";
-    u->v.i[0] = sc->next_texture_unit++;
-    u->tex_target = GL_TEXTURE_2D;
-    u->tex_handle = texture;
 }
 
 void gl_sc_uniform_f(struct gl_shader_cache *sc, char *name, GLfloat f)
@@ -771,46 +751,30 @@ static const char *vao_glsl_type(const struct gl_vao_entry *e)
 }
 
 // Assumes program is current (gl->UseProgram(program)).
-static void update_uniform(GL *gl, struct sc_entry *e, struct sc_uniform *u, int n)
+static void update_uniform(GL *gl, GLuint program, struct sc_uniform *u)
 {
-    struct sc_cached_uniform *un = &e->uniforms[n];
-    GLint loc = un->loc;
+    GLint loc = gl->GetUniformLocation(program, u->name);
     if (loc < 0)
         return;
     switch (u->type) {
     case UT_i:
         assert(u->size == 1);
-        if (memcmp(un->v.i, u->v.i, sizeof(u->v.i)) != 0) {
-            memcpy(un->v.i, u->v.i, sizeof(u->v.i));
-            gl->Uniform1i(loc, u->v.i[0]);
-        }
-        // For samplers: set the actual texture.
-        if (u->tex_target) {
-            gl->ActiveTexture(GL_TEXTURE0 + u->v.i[0]);
-            gl->BindTexture(u->tex_target, u->tex_handle);
-        }
+        gl->Uniform1i(loc, u->v.i[0]);
         break;
     case UT_f:
-        if (memcmp(un->v.f, u->v.f, sizeof(u->v.f)) != 0) {
-            memcpy(un->v.f, u->v.f, sizeof(u->v.f));
-            switch (u->size) {
-            case 1: gl->Uniform1f(loc, u->v.f[0]); break;
-            case 2: gl->Uniform2f(loc, u->v.f[0], u->v.f[1]); break;
-            case 3: gl->Uniform3f(loc, u->v.f[0], u->v.f[1], u->v.f[2]); break;
-            case 4: gl->Uniform4f(loc, u->v.f[0], u->v.f[1], u->v.f[2],
-                                  u->v.f[3]); break;
-            default: abort();
-            }
+        switch (u->size) {
+        case 1: gl->Uniform1f(loc, u->v.f[0]); break;
+        case 2: gl->Uniform2f(loc, u->v.f[0], u->v.f[1]); break;
+        case 3: gl->Uniform3f(loc, u->v.f[0], u->v.f[1], u->v.f[2]); break;
+        case 4: gl->Uniform4f(loc, u->v.f[0], u->v.f[1], u->v.f[2], u->v.f[3]); break;
+        default: abort();
         }
         break;
     case UT_m:
-        if (memcmp(un->v.f, u->v.f, sizeof(u->v.f)) != 0) {
-            memcpy(un->v.f, u->v.f, sizeof(u->v.f));
-            switch (u->size) {
-            case 2: gl->UniformMatrix2fv(loc, 1, GL_FALSE, &u->v.f[0]); break;
-            case 3: gl->UniformMatrix3fv(loc, 1, GL_FALSE, &u->v.f[0]); break;
-            default: abort();
-            }
+        switch (u->size) {
+        case 2: gl->UniformMatrix2fv(loc, 1, GL_FALSE, &u->v.f[0]); break;
+        case 3: gl->UniformMatrix3fv(loc, 1, GL_FALSE, &u->v.f[0]); break;
+        default: abort();
         }
         break;
     default:
@@ -826,9 +790,9 @@ static void compile_attach_shader(struct gl_shader_cache *sc, GLuint program,
     GLuint shader = gl->CreateShader(type);
     gl->ShaderSource(shader, 1, &source, NULL);
     gl->CompileShader(shader);
-    GLint status = 0;
+    GLint status;
     gl->GetShaderiv(shader, GL_COMPILE_STATUS, &status);
-    GLint log_length = 0;
+    GLint log_length;
     gl->GetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
 
     int pri = status ? (log_length > 1 ? MSGL_V : MSGL_DEBUG) : MSGL_ERR;
@@ -844,31 +808,18 @@ static void compile_attach_shader(struct gl_shader_cache *sc, GLuint program,
                typestr, status, logstr);
         talloc_free(logstr);
     }
-    if (gl->GetTranslatedShaderSourceANGLE && mp_msg_test(sc->log, MSGL_DEBUG)) {
-        GLint len = 0;
-        gl->GetShaderiv(shader, GL_TRANSLATED_SHADER_SOURCE_LENGTH_ANGLE, &len);
-        if (len > 0) {
-            GLchar *sstr = talloc_zero_size(NULL, len + 1);
-            gl->GetTranslatedShaderSourceANGLE(shader, len, NULL, sstr);
-            MP_DBG(sc, "Translated shader:\n");
-            mp_log_source(sc->log, MSGL_DEBUG, sstr);
-        }
-    }
 
     gl->AttachShader(program, shader);
     gl->DeleteShader(shader);
-
-    if (!status)
-        sc->error_state = true;
 }
 
 static void link_shader(struct gl_shader_cache *sc, GLuint program)
 {
     GL *gl = sc->gl;
     gl->LinkProgram(program);
-    GLint status = 0;
+    GLint status;
     gl->GetProgramiv(program, GL_LINK_STATUS, &status);
-    GLint log_length = 0;
+    GLint log_length;
     gl->GetProgramiv(program, GL_INFO_LOG_LENGTH, &log_length);
 
     int pri = status ? (log_length > 1 ? MSGL_V : MSGL_DEBUG) : MSGL_ERR;
@@ -878,9 +829,6 @@ static void link_shader(struct gl_shader_cache *sc, GLuint program)
         MP_MSG(sc, pri, "shader link log (status=%d): %s\n", status, logstr);
         talloc_free(logstr);
     }
-
-    if (!status)
-        sc->error_state = true;
 }
 
 static GLuint create_program(struct gl_shader_cache *sc, const char *vertex,
@@ -888,13 +836,12 @@ static GLuint create_program(struct gl_shader_cache *sc, const char *vertex,
 {
     GL *gl = sc->gl;
     MP_VERBOSE(sc, "recompiling a shader program:\n");
-    if (sc->header_text.len) {
+    if (sc->header_text[0]) {
         MP_VERBOSE(sc, "header:\n");
-        mp_log_source(sc->log, MSGL_V, sc->header_text.start);
+        mp_log_source(sc->log, MSGL_V, sc->header_text);
         MP_VERBOSE(sc, "body:\n");
     }
-    if (sc->text.len)
-        mp_log_source(sc->log, MSGL_V, sc->text.start);
+    mp_log_source(sc->log, MSGL_V, sc->text);
     GLuint prog = gl->CreateProgram();
     compile_attach_shader(sc, prog, GL_VERTEX_SHADER, vertex);
     compile_attach_shader(sc, prog, GL_FRAGMENT_SHADER, frag);
@@ -907,54 +854,36 @@ static GLuint create_program(struct gl_shader_cache *sc, const char *vertex,
     return prog;
 }
 
-#define ADD(x, ...) bstr_xappend_asprintf(sc, (x), __VA_ARGS__)
-#define ADD_BSTR(x, s) bstr_xappend(sc, (x), (s))
+#define ADD(x, ...) (x) = talloc_asprintf_append(x, __VA_ARGS__)
 
 // 1. Generate vertex and fragment shaders from the fragment shader text added
 //    with gl_sc_add(). The generated shader program is cached (based on the
 //    text), so actual compilation happens only the first time.
-// 2. Update the uniforms and textures set with gl_sc_uniform_*.
+// 2. Update the uniforms set with gl_sc_uniform_*.
 // 3. Make the new shader program current (glUseProgram()).
-// After that, you render, and then you call gc_sc_reset(), which does:
-// 1. Unbind the program and all textures.
-// 2. Reset the sc state and prepare for a new shader program. (All uniforms
+// 4. Reset the sc state and prepare for a new shader program. (All uniforms
 //    and fragment operations needed for the next program have to be re-added.)
-void gl_sc_generate(struct gl_shader_cache *sc)
+void gl_sc_gen_shader_and_reset(struct gl_shader_cache *sc)
 {
     GL *gl = sc->gl;
-
-    // gl_sc_reset() must be called after ending the previous render process,
-    // and before starting a new one.
-    assert(!sc->needs_reset);
+    void *tmp = talloc_new(NULL);
 
     assert(sc->vao);
 
-    for (int n = 0; n < MP_ARRAY_SIZE(sc->tmp); n++)
-        sc->tmp[n].len = 0;
-
     // set up shader text (header + uniforms + body)
-    bstr *header = &sc->tmp[0];
-    ADD(header, "#version %d%s\n", gl->glsl_version, gl->es >= 300 ? " es" : "");
-    for (int n = 0; n < sc->num_exts; n++)
-        ADD(header, "#extension %s : enable\n", sc->exts[n]);
-    if (gl->es) {
+    char *header = talloc_asprintf(tmp, "#version %d%s\n", gl->glsl_version,
+                                   gl->es >= 300 ? " es" : "");
+    if (gl->es)
         ADD(header, "precision mediump float;\n");
-        ADD(header, "precision mediump sampler2D;\n");
-        if (gl->mpgl_caps & MPGL_CAP_3D_TEX)
-            ADD(header, "precision mediump sampler3D;\n");
-    }
-    ADD_BSTR(header, sc->prelude_text);
     char *vert_in = gl->glsl_version >= 130 ? "in" : "attribute";
     char *vert_out = gl->glsl_version >= 130 ? "out" : "varying";
     char *frag_in = gl->glsl_version >= 130 ? "in" : "varying";
 
     // vertex shader: we don't use the vertex shader, so just setup a dummy,
     // which passes through the vertex array attributes.
-    bstr *vert_head = &sc->tmp[1];
-    ADD_BSTR(vert_head, *header);
-    bstr *vert_body = &sc->tmp[2];
-    ADD(vert_body, "void main() {\n");
-    bstr *frag_vaos = &sc->tmp[3];
+    char *vert_head = talloc_strdup(tmp, header);
+    char *vert_body = talloc_strdup(tmp, "void main() {\n");
+    char *frag_vaos = talloc_strdup(tmp, "");
     for (int n = 0; sc->vao->entries[n].name; n++) {
         const struct gl_vao_entry *e = &sc->vao->entries[n];
         const char *glsl_type = vao_glsl_type(e);
@@ -971,12 +900,11 @@ void gl_sc_generate(struct gl_shader_cache *sc)
         }
     }
     ADD(vert_body, "}\n");
-    bstr *vert = vert_head;
-    ADD_BSTR(vert, *vert_body);
+    char *vert = talloc_asprintf(tmp, "%s%s", vert_head, vert_body);
 
     // fragment shader; still requires adding used uniforms and VAO elements
-    bstr *frag = &sc->tmp[4];
-    ADD_BSTR(frag, *header);
+    char *frag = talloc_strdup(tmp, header);
+    ADD(frag, "#define RG %s\n", gl->mpgl_caps & MPGL_CAP_TEX_RG ? "rg" : "ra");
     if (gl->glsl_version >= 130) {
         ADD(frag, "#define texture1D texture\n");
         ADD(frag, "#define texture3D texture\n");
@@ -984,26 +912,20 @@ void gl_sc_generate(struct gl_shader_cache *sc)
     } else {
         ADD(frag, "#define texture texture2D\n");
     }
-    ADD_BSTR(frag, *frag_vaos);
+    ADD(frag, "%s", frag_vaos);
     for (int n = 0; n < sc->num_uniforms; n++) {
         struct sc_uniform *u = &sc->uniforms[n];
         ADD(frag, "uniform %s %s;\n", u->glsl_type, u->name);
     }
-
-    // Additional helpers.
-    ADD(frag, "#define LUT_POS(x, lut_size)"
-              " mix(0.5 / (lut_size), 1.0 - 0.5 / (lut_size), (x))\n");
-
     // custom shader header
-    if (sc->header_text.len) {
+    if (sc->header_text[0]) {
         ADD(frag, "// header\n");
-        ADD_BSTR(frag, sc->header_text);
+        ADD(frag, "%s\n", sc->header_text);
         ADD(frag, "// body\n");
     }
     ADD(frag, "void main() {\n");
+    ADD(frag, "%s", sc->text);
     // we require _all_ frag shaders to write to a "vec4 color"
-    ADD(frag, "vec4 color = vec4(0.0, 0.0, 0.0, 1.0);\n");
-    ADD_BSTR(frag, sc->text);
     if (gl->glsl_version >= 130) {
         ADD(frag, "out_color = color;\n");
     } else {
@@ -1011,241 +933,32 @@ void gl_sc_generate(struct gl_shader_cache *sc)
     }
     ADD(frag, "}\n");
 
+    char *key = talloc_asprintf(tmp, "%s%s", vert, frag);
     struct sc_entry *entry = NULL;
     for (int n = 0; n < sc->num_entries; n++) {
-        struct sc_entry *cur = &sc->entries[n];
-        if (bstr_equals(cur->frag, *frag) && bstr_equals(cur->vert, *vert)) {
-            entry = cur;
+        if (strcmp(key, sc->entries[n].key) == 0) {
+            entry = &sc->entries[n];
             break;
         }
     }
     if (!entry) {
-        if (sc->num_entries == SC_MAX_ENTRIES)
+        if (sc->num_entries == SC_ENTRIES)
             sc_flush_cache(sc);
-        MP_TARRAY_GROW(sc, sc->entries, sc->num_entries);
         entry = &sc->entries[sc->num_entries++];
-        *entry = (struct sc_entry){
-            .vert = bstrdup(NULL, *vert),
-            .frag = bstrdup(NULL, *frag),
-        };
+        *entry = (struct sc_entry){.key = talloc_strdup(NULL, key)};
     }
-    // build vertex shader from vao and cache the locations of the uniform variables
-    if (!entry->gl_shader) {
-        entry->gl_shader = create_program(sc, vert->start, frag->start);
-        entry->num_uniforms = 0;
-        for (int n = 0; n < sc->num_uniforms; n++) {
-            struct sc_cached_uniform un = {
-                .loc = gl->GetUniformLocation(entry->gl_shader,
-                                              sc->uniforms[n].name),
-            };
-            MP_TARRAY_APPEND(sc, entry->uniforms, entry->num_uniforms, un);
-        }
-    }
+    // build vertex shader from vao
+    if (!entry->gl_shader)
+        entry->gl_shader = create_program(sc, vert, frag);
 
     gl->UseProgram(entry->gl_shader);
 
-    assert(sc->num_uniforms == entry->num_uniforms);
-
+    // For now we set the uniforms every time. This is probably bad, and we
+    // should switch to caching them.
     for (int n = 0; n < sc->num_uniforms; n++)
-        update_uniform(gl, entry, &sc->uniforms[n], n);
+        update_uniform(gl, entry->gl_shader, &sc->uniforms[n]);
 
-    gl->ActiveTexture(GL_TEXTURE0);
+    talloc_free(tmp);
 
-    sc->needs_reset = true;
-}
-
-// Maximum number of simultaneous query objects to keep around. Reducing this
-// number might cause rendering to block until the result of a previous query is
-// available
-#define QUERY_OBJECT_NUM 8
-
-// How many samples to keep around, for the sake of average and peak
-// calculations. This corresponds to a few seconds (exact time variable)
-#define QUERY_SAMPLE_SIZE 256
-
-struct gl_timer {
-    GL *gl;
-    GLuint query[QUERY_OBJECT_NUM];
-    int query_idx;
-
-    GLuint64 samples[QUERY_SAMPLE_SIZE];
-    int sample_idx;
-    int sample_count;
-
-    uint64_t avg_sum;
-    uint64_t peak;
-};
-
-int gl_timer_sample_count(struct gl_timer *timer)
-{
-    return timer->sample_count;
-}
-
-uint64_t gl_timer_last_us(struct gl_timer *timer)
-{
-    return timer->samples[(timer->sample_idx - 1) % QUERY_SAMPLE_SIZE] / 1000;
-}
-
-uint64_t gl_timer_avg_us(struct gl_timer *timer)
-{
-    if (timer->sample_count <= 0)
-        return 0;
-
-    return timer->avg_sum / timer->sample_count / 1000;
-}
-
-uint64_t gl_timer_peak_us(struct gl_timer *timer)
-{
-    return timer->peak / 1000;
-}
-
-struct gl_timer *gl_timer_create(GL *gl)
-{
-    struct gl_timer *timer = talloc_ptrtype(NULL, timer);
-    *timer = (struct gl_timer){ .gl = gl };
-
-    if (gl->GenQueries)
-        gl->GenQueries(QUERY_OBJECT_NUM, timer->query);
-
-    return timer;
-}
-
-void gl_timer_free(struct gl_timer *timer)
-{
-    if (!timer)
-        return;
-
-    GL *gl = timer->gl;
-    if (gl && gl->DeleteQueries) {
-        // this is a no-op on already uninitialized queries
-        gl->DeleteQueries(QUERY_OBJECT_NUM, timer->query);
-    }
-
-    talloc_free(timer);
-}
-
-static void gl_timer_record(struct gl_timer *timer, GLuint64 new)
-{
-    // Input res into the buffer and grab the previous value
-    GLuint64 old = timer->samples[timer->sample_idx];
-    timer->samples[timer->sample_idx++] = new;
-    timer->sample_idx %= QUERY_SAMPLE_SIZE;
-
-    // Update average and sum
-    timer->avg_sum = timer->avg_sum + new - old;
-    timer->sample_count = MPMIN(timer->sample_count + 1, QUERY_SAMPLE_SIZE);
-
-    // Update peak if necessary
-    if (new >= timer->peak) {
-        timer->peak = new;
-    } else if (timer->peak == old) {
-        // It's possible that the last peak was the value we just removed,
-        // if so we need to scan for the new peak
-        uint64_t peak = new;
-        for (int i = 0; i < QUERY_SAMPLE_SIZE; i++)
-            peak = MPMAX(peak, timer->samples[i]);
-        timer->peak = peak;
-    }
-}
-
-// If no free query is available, this can block. Shouldn't ever happen in
-// practice, though. (If it does, consider increasing QUERY_OBJECT_NUM)
-// IMPORTANT: only one gl_timer object may ever be active at a single time.
-// The caling code *MUST* ensure this
-void gl_timer_start(struct gl_timer *timer)
-{
-    GL *gl = timer->gl;
-    if (!gl->BeginQuery)
-        return;
-
-    // Get the next query object
-    GLuint id = timer->query[timer->query_idx++];
-    timer->query_idx %= QUERY_OBJECT_NUM;
-
-    // If this query object already holds a result, we need to get and
-    // record it first
-    if (gl->IsQuery(id)) {
-        GLuint64 elapsed;
-        gl->GetQueryObjectui64v(id, GL_QUERY_RESULT, &elapsed);
-        gl_timer_record(timer, elapsed);
-    }
-
-    gl->BeginQuery(GL_TIME_ELAPSED, id);
-}
-
-void gl_timer_stop(struct gl_timer *timer)
-{
-    GL *gl = timer->gl;
-    if (gl->EndQuery)
-        gl->EndQuery(GL_TIME_ELAPSED);
-}
-
-// Upload a texture, going through a PBO. PBO supposedly can facilitate
-// asynchronous copy from CPU to GPU, so this is an optimization. Note that
-// changing format/type/tex_w/tex_h or reusing the PBO in the same frame can
-// ruin performance.
-// This call is like gl_upload_tex(), plus PBO management/use.
-// target, format, type, dataptr, stride, x, y, w, h: texture upload params
-//                                                    (see gl_upload_tex())
-// tex_w, tex_h: maximum size of the used texture
-// use_pbo: for convenience, if false redirects the call to gl_upload_tex
-void gl_pbo_upload_tex(struct gl_pbo_upload *pbo, GL *gl, bool use_pbo,
-                       GLenum target, GLenum format, GLenum type,
-                       int tex_w, int tex_h, const void *dataptr, int stride,
-                       int x, int y, int w, int h)
-{
-    assert(x >= 0 && y >= 0 && w >= 0 && h >= 0);
-    assert(x + w <= tex_w && y + h <= tex_h);
-
-    if (!use_pbo || !gl->MapBufferRange)
-        goto no_pbo;
-
-    size_t pix_stride = gl_bytes_per_pixel(format, type);
-    size_t buffer_size = pix_stride * tex_w * tex_h;
-    size_t needed_size = pix_stride * w * h;
-
-    if (buffer_size != pbo->buffer_size)
-        gl_pbo_upload_uninit(pbo);
-
-    if (!pbo->buffers[0]) {
-        pbo->gl = gl;
-        pbo->buffer_size = buffer_size;
-        gl->GenBuffers(NUM_PBO_BUFFERS, &pbo->buffers[0]);
-        for (int n = 0; n < NUM_PBO_BUFFERS; n++) {
-            gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo->buffers[n]);
-            gl->BufferData(GL_PIXEL_UNPACK_BUFFER, buffer_size, NULL,
-                           GL_DYNAMIC_COPY);
-        }
-    }
-
-    pbo->index = (pbo->index + 1) % NUM_PBO_BUFFERS;
-
-    gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo->buffers[pbo->index]);
-    void *data = gl->MapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, needed_size,
-                                    GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-    if (!data)
-        goto no_pbo;
-
-    memcpy_pic(data, dataptr, pix_stride * w,  h, pix_stride * w, stride);
-
-    if (!gl->UnmapBuffer(GL_PIXEL_UNPACK_BUFFER)) {
-        gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        goto no_pbo;
-    }
-
-    gl_upload_tex(gl, target, format, type, NULL, pix_stride * w, x, y, w, h);
-
-    gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-    return;
-
-no_pbo:
-    gl_upload_tex(gl, target, format, type, dataptr, stride, x, y, w, h);
-}
-
-void gl_pbo_upload_uninit(struct gl_pbo_upload *pbo)
-{
-    if (pbo->gl)
-        pbo->gl->DeleteBuffers(NUM_PBO_BUFFERS, &pbo->buffers[0]);
-    *pbo = (struct gl_pbo_upload){0};
+    gl_sc_reset(sc);
 }

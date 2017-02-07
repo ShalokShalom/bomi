@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <string.h>
@@ -37,14 +37,10 @@
 #include "libmpv/client.h"
 
 extern const struct mp_scripting mp_scripting_lua;
-extern const struct mp_scripting mp_scripting_cplugin;
 
 static const struct mp_scripting *const scripting_backends[] = {
 #if HAVE_LUA
     &mp_scripting_lua,
-#endif
-#if HAVE_CPLUGINS
-    &mp_scripting_cplugin,
 #endif
     NULL
 };
@@ -84,12 +80,13 @@ static void *script_thread(void *p)
     struct thread_arg *arg = p;
 
     char name[90];
-    snprintf(name, sizeof(name), "%s (%s)", arg->backend->name,
-             mpv_client_name(arg->client));
+    snprintf(name, sizeof(name), "lua (%s)", mpv_client_name(arg->client));
     mpthread_set_name(name);
 
     if (arg->backend->load(arg->client, arg->fname) < 0)
-        MP_ERR(arg, "Could not load %s %s\n", arg->backend->name, arg->fname);
+        MP_ERR(arg, "Could not load script %s\n", arg->fname);
+
+    MP_VERBOSE(arg, "Exiting...\n");
 
     mpv_detach_destroy(arg->client);
     talloc_free(arg);
@@ -100,10 +97,9 @@ static void wait_loaded(struct MPContext *mpctx)
 {
     while (!mp_clients_all_initialized(mpctx))
         mp_idle(mpctx);
-    mp_wakeup_core(mpctx); // avoid lost wakeups during waiting
 }
 
-int mp_load_script(struct MPContext *mpctx, const char *fname)
+static void mp_load_script(struct MPContext *mpctx, const char *fname)
 {
     char *ext = mp_splitext(fname, NULL);
     const struct mp_scripting *backend = NULL;
@@ -117,7 +113,7 @@ int mp_load_script(struct MPContext *mpctx, const char *fname)
 
     if (!backend) {
         MP_VERBOSE(mpctx, "Can't load unknown script: %s\n", fname);
-        return -1;
+        return;
     }
 
     struct thread_arg *arg = talloc_ptrtype(NULL, arg);
@@ -132,23 +128,23 @@ int mp_load_script(struct MPContext *mpctx, const char *fname)
     };
     if (!arg->client) {
         talloc_free(arg);
-        return -1;
+        return;
     }
     arg->log = mp_client_get_log(arg->client);
 
-    MP_VERBOSE(arg, "Loading %s %s...\n", backend->name, fname);
+    MP_VERBOSE(arg, "Loading script %s...\n", fname);
 
     pthread_t thread;
     if (pthread_create(&thread, NULL, script_thread, arg)) {
         mpv_detach_destroy(arg->client);
         talloc_free(arg);
-        return -1;
+        return;
     }
 
     wait_loaded(mpctx);
     MP_VERBOSE(mpctx, "Done loading %s.\n", fname);
 
-    return 0;
+    return;
 }
 
 static int compare_filename(const void *pa, const void *pb)
@@ -179,40 +175,13 @@ static char **list_script_files(void *talloc_ctx, char *path)
     return files;
 }
 
-static void load_builtin_script(struct MPContext *mpctx, bool enable,
-                                const char *fname)
-{
-    void *tmp = talloc_new(NULL);
-    // (The name doesn't have to match if there were conflicts with other
-    // scripts, so this is on best-effort basis.)
-    char *name = script_name_from_filename(tmp, fname);
-    if (enable != mp_client_exists(mpctx, name)) {
-        if (enable) {
-            mp_load_script(mpctx, fname);
-        } else {
-            // Try to unload it by sending a shutdown event. Wait until it has
-            // terminated, or re-enabling the script could be racy (because it'd
-            // recognize a still-terminating script as "loaded").
-            while (mp_client_exists(mpctx, name)) {
-                if (mp_client_send_event(mpctx, name, MPV_EVENT_SHUTDOWN, NULL) < 0)
-                    break;
-                mp_idle(mpctx);
-            }
-            mp_wakeup_core(mpctx); // avoid lost wakeups during waiting
-        }
-    }
-    talloc_free(tmp);
-}
-
-void mp_load_builtin_scripts(struct MPContext *mpctx)
-{
-    load_builtin_script(mpctx, mpctx->opts->lua_load_osc, "@osc.lua");
-    load_builtin_script(mpctx, mpctx->opts->lua_load_ytdl, "@ytdl_hook.lua");
-}
-
 void mp_load_scripts(struct MPContext *mpctx)
 {
     // Load scripts from options
+    if (mpctx->opts->lua_load_osc)
+        mp_load_script(mpctx, "@osc.lua");
+    if (mpctx->opts->lua_load_ytdl)
+        mp_load_script(mpctx, "@ytdl_hook.lua");
     char **files = mpctx->opts->script_files;
     for (int n = 0; files && files[n]; n++) {
         if (files[n][0])
@@ -231,34 +200,3 @@ void mp_load_scripts(struct MPContext *mpctx)
     }
     talloc_free(tmp);
 }
-
-#if HAVE_CPLUGINS
-
-#include <dlfcn.h>
-
-#define MPV_DLOPEN_FN "mpv_open_cplugin"
-typedef int (*mpv_open_cplugin)(mpv_handle *handle);
-
-static int load_cplugin(struct mpv_handle *client, const char *fname)
-{
-    int r = -1;
-    void *lib = dlopen(fname, RTLD_NOW | RTLD_LOCAL);
-    if (!lib)
-        goto error;
-    // Note: once loaded, we never unload, as unloading the libraries linked to
-    //       the plugin can cause random serious problems.
-    mpv_open_cplugin sym = (mpv_open_cplugin)dlsym(lib, MPV_DLOPEN_FN);
-    if (!sym)
-        goto error;
-    r = sym(client) ? -1 : 0;
-error:
-    return r;
-}
-
-const struct mp_scripting mp_scripting_cplugin = {
-    .name = "SO plugin",
-    .file_ext = "so",
-    .load = load_cplugin,
-};
-
-#endif

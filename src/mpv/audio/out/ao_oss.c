@@ -462,7 +462,7 @@ static int init(struct ao *ao)
         p->buffersize = 0;
         memset(data, 0, p->outburst);
         while (p->buffersize < 0x40000 && device_writable(ao) > 0) {
-            (void)write(p->audio_fd, data, p->outburst);
+            write(p->audio_fd, data, p->outburst);
             p->buffersize += p->outburst;
         }
         free(data);
@@ -612,12 +612,6 @@ static int audio_wait(struct ao *ao, pthread_mutex_t *lock)
     return r;
 }
 
-static void list_devs(struct ao *ao, struct ao_device_list *list)
-{
-    if (stat(PATH_DEV_DSP, &(struct stat){0}) == 0)
-        ao_device_list_add(list, ao, &(struct ao_device_desc){"", "Default"});
-}
-
 #define OPT_BASE_STRUCT struct priv
 
 const struct ao_driver audio_out_oss = {
@@ -635,7 +629,6 @@ const struct ao_driver audio_out_oss = {
     .drain     = drain,
     .wait      = audio_wait,
     .wakeup    = ao_wakeup_poll,
-    .list_devs = list_devs,
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .audio_fd = -1,
@@ -648,10 +641,9 @@ const struct ao_driver audio_out_oss = {
         .oss_mixer_device = PATH_DEV_MIXER,
     },
     .options = (const struct m_option[]) {
-        OPT_STRING("device", dsp, 0, DEVICE_OPT_DEPRECATION),
+        OPT_STRING("device", dsp, 0),
         OPT_STRING("mixer-device", oss_mixer_device, 0),
         OPT_STRING("mixer-channel", cfg_oss_mixer_channel, 0),
         {0}
     },
-    .options_prefix = "oss",
 };

@@ -3,19 +3,18 @@ local msg = require 'mp.msg'
 
 local ytdl = {
     path = "youtube-dl",
-    searched = false
+    minver = "2015.02.23.1",
+    vercheck = nil,
 }
-
-local chapter_list = {}
 
 local function exec(args)
     local ret = utils.subprocess({args = args})
     return ret.status, ret.stdout, ret
 end
 
--- return true if it was explicitly set on the command line
+-- return if it was explicitly set on the command line
 local function option_was_set(name)
-    return mp.get_property_bool("option-info/" ..name.. "/set-from-commandline",
+    return mp.get_property_bool("option-info/" .. name .. "/set-from-commandline",
                                 false)
 end
 
@@ -29,12 +28,9 @@ local function set_http_headers(http_headers)
     if useragent and not option_was_set("user-agent") then
         mp.set_property("file-local-options/user-agent", useragent)
     end
-    local additional_fields = {"Cookie", "Referer"}
-    for idx, item in pairs(additional_fields) do
-        local field_value = http_headers[item]
-        if field_value then
-            headers[#headers + 1] = item .. ": " .. field_value
-        end
+    local cookies = http_headers["Cookie"]
+    if cookies then
+        headers[#headers + 1] = "Cookie: " .. cookies
     end
     if #headers > 0 and not option_was_set("http-header-fields") then
         mp.set_property_native("file-local-options/http-header-fields", headers)
@@ -55,90 +51,41 @@ local function append_rtmp_prop(props, name, value)
     return props..name.."=\""..value.."\""
 end
 
-local function edl_escape(url)
-    return "%" .. string.len(url) .. "%" .. url
-end
-
-local function time_to_secs(time_string)
-    local ret
-
-    local a, b, c = time_string:match("(%d+):(%d%d?):(%d%d)")
-    if a ~= nil then
-        ret = (a*3600 + b*60 + c)
-    else
-        a, b = time_string:match("(%d%d?):(%d%d)")
-        if a ~= nil then
-            ret = (a*60 + b)
-        end
-    end
-
-    return ret
-end
-
-local function extract_chapters(data, video_length)
-    local ret = {}
-
-    for line in data:gmatch("[^\r\n]+") do
-        local time = time_to_secs(line)
-        if time and (time < video_length) then
-            table.insert(ret, {time = time, title = line})
-        end
-    end
-    table.sort(ret, function(a, b) return a.time < b.time end)
-    return ret
-end
-
-local function edl_track_joined(fragments, protocol)
-    if not (type(fragments) == "table") or not fragments[1] then
-        msg.debug("No fragments to join into EDL")
-        return nil
-    end
-
-    local edl = "edl://"
-    local offset = 1
-
-    if (protocol == "http_dash_segments") and
-        not fragments[1].duration then
-        -- assume MP4 DASH initialization segment
-        edl = edl .. "!mp4_dash,init=" .. edl_escape(fragments[1].url) .. ";"
-        offset = 2
-
-        -- Check remaining fragments for duration;
-        -- if not available in all, give up.
-        for i = offset, #fragments do
-            if not fragments[i].duration then
-                msg.error("EDL doesn't support fragments" ..
-                         "without duration with MP4 DASH")
-                return nil
-            end
-        end
-    end
-
-    for i = offset, #fragments do
-        local fragment = fragments[i]
-        edl = edl .. edl_escape(fragment.url)
-        if fragment.duration then
-            edl = edl..",length="..fragment.duration
-        end
-        edl = edl .. ";"
-    end
-    return edl
-end
-
 mp.add_hook("on_load", 10, function ()
     local url = mp.get_property("stream-open-filename")
 
     if (url:find("http://") == 1) or (url:find("https://") == 1)
         or (url:find("ytdl://") == 1) then
 
-        -- check for youtube-dl in mpv's config dir
-        if not (ytdl.searched) then
+       -- check version of youtube-dl if not done yet
+        if (ytdl.vercheck == nil) then
+
+             -- check for youtube-dl in mpv's config dir
             local ytdl_mcd = mp.find_config_file("youtube-dl")
             if not (ytdl_mcd == nil) then
                 msg.verbose("found youtube-dl at: " .. ytdl_mcd)
                 ytdl.path = ytdl_mcd
             end
-            ytdl.searched = true
+
+            msg.debug("checking ytdl version ...")
+            local es, version = exec({ytdl.path, "--version"})
+            if (es < 0) then
+                msg.warn("youtube-dl not found, not executable, or broken.")
+                ytdl.vercheck = false
+            elseif (version < ytdl.minver) then
+                msg.verbose("found youtube-dl version: " .. version)
+                msg.warn("Your version of youtube-dl is too old! "
+                    .. "You need at least version '"..ytdl.minver
+                    .. "', try running `youtube-dl -U`.")
+                ytdl.vercheck = false
+            else
+                msg.verbose("found youtube-dl version: " .. version)
+                ytdl.vercheck = true
+            end
+        end
+
+        if not (ytdl.vercheck) then
+            return
         end
 
         -- strip ytdl://
@@ -148,40 +95,28 @@ mp.add_hook("on_load", 10, function ()
 
         local format = mp.get_property("options/ytdl-format")
         local raw_options = mp.get_property_native("options/ytdl-raw-options")
-        local allsubs = true
 
         local command = {
-            ytdl.path, "--no-warnings", "-J", "--flat-playlist",
+            ytdl.path, "--no-warnings", "-J", "--flat-playlist", "--all-subs",
             "--sub-format", "ass/srt/best", "--no-playlist"
         }
 
-        -- Checks if video option is "no", change format accordingly,
-        -- but only if user didn't explicitly set one
-        if (mp.get_property("options/vid") == "no")
-            and not option_was_set("ytdl-format") then
-
+        -- Checks if video option is "no", change options accordingly
+        if (mp.get_property("options/vid") == "no") then
             format = "bestaudio/best"
             msg.verbose("Video disabled. Only using audio")
         end
 
-        if (format == "") then
-            format = "bestvideo+bestaudio/best"
+        if (format ~= "") then
+            table.insert(command, "--format")
+            table.insert(command, format)
         end
-        table.insert(command, "--format")
-        table.insert(command, format)
 
         for param, arg in pairs(raw_options) do
             table.insert(command, "--" .. param)
             if (arg ~= "") then
                 table.insert(command, arg)
             end
-            if (param == "sub-lang") and (arg ~= "") then
-                allsubs = false
-            end
-        end
-
-        if (allsubs == true) then
-            table.insert(command, "--all-subs")
         end
         table.insert(command, "--")
         table.insert(command, url)
@@ -210,8 +145,7 @@ mp.add_hook("on_load", 10, function ()
             msg.verbose("Got direct URL")
             return
         elseif not (json["_type"] == nil)
-            and ((json["_type"] == "playlist")
-            or (json["_type"] == "multi_video")) then
+            and ((json["_type"] == "playlist") or (json["_type"] == "multi_video")) then
             -- a playlist
 
             if (#json.entries == 0) then
@@ -221,12 +155,18 @@ mp.add_hook("on_load", 10, function ()
 
 
             -- some funky guessing to detect multi-arc videos
-            if (not (json.entries[1]["_type"] == "url_transparent")) and
-                (not (json.entries[1]["webpage_url"] == nil)
-                and (json.entries[1]["webpage_url"] == json["webpage_url"])) then
+            if  not (json.entries[1]["webpage_url"] == nil)
+                and (json.entries[1]["webpage_url"] == json["webpage_url"]) then
                 msg.verbose("multi-arc video detected, building EDL")
 
-                local playlist = edl_track_joined(json.entries)
+
+                local playlist = "edl://"
+                for i, entry in pairs(json.entries) do
+
+                    local urllength = string.len(entry.url)
+                    playlist = playlist .. "%" .. urllength .. "%" .. entry.url .. ";"
+
+                end
 
                 msg.debug("EDL: " .. playlist)
 
@@ -237,35 +177,7 @@ mp.add_hook("on_load", 10, function ()
 
                 mp.set_property("stream-open-filename", playlist)
                 if not (json.title == nil) then
-                    mp.set_property("file-local-options/force-media-title",
-                        json.title)
-                end
-
-                -- there might not be subs for the first segment
-                local entry_wsubs = nil
-                for i, entry in pairs(json.entries) do
-                    if not (entry.requested_subtitles == nil) then
-                        entry_wsubs = i
-                        break
-                    end
-                end
-
-                if not (entry_wsubs == nil) and
-                    not (json.entries[entry_wsubs].duration == nil) then
-                    for j, req in pairs(json.entries[entry_wsubs].requested_subtitles) do
-                        local subfile = "edl://"
-                        for i, entry in pairs(json.entries) do
-                            if not (entry.requested_subtitles == nil) and
-                                not (entry.requested_subtitles[j] == nil) then
-                                subfile = subfile..edl_escape(entry.requested_subtitles[j].url)
-                            else
-                                subfile = subfile..edl_escape("memory://WEBVTT")
-                            end
-                            subfile = subfile..",length="..entry.duration..";"
-                        end
-                        msg.debug(j.." sub EDL: "..subfile)
-                        mp.commandv("sub-add", subfile, "auto", req.ext, j)
-                    end
+                    mp.set_property("file-local-options/force-media-title", json.title)
                 end
 
             else
@@ -273,20 +185,13 @@ mp.add_hook("on_load", 10, function ()
                 local playlist = "#EXTM3U\n"
                 for i, entry in pairs(json.entries) do
                     local site = entry.url
-                    local title = entry.title
-
-                    if not (title == nil) then
-                        title = string.gsub(title, '%s+', ' ')
-                        playlist = playlist .. "#EXTINF:0," .. title .. "\n"
-                    end
 
                     -- some extractors will still return the full info for
                     -- all clips in the playlist and the URL will point
                     -- directly to the file in that case, which we don't
                     -- want so get the webpage URL instead, which is what
                     -- we want
-                    if not (json.entries[1]["_type"] == "url_transparent")
-                        and not (entry["webpage_url"] == nil) then
+                    if not (entry["webpage_url"] == nil) then
                         site = entry["webpage_url"]
                     end
 
@@ -299,28 +204,27 @@ mp.add_hook("on_load", 10, function ()
         else -- probably a video
             local streamurl = ""
 
-            -- DASH/split tracks
+            -- DASH?
             if not (json["requested_formats"] == nil) then
-                for _, track in pairs(json.requested_formats) do
-                    local edl_track = nil
-                    edl_track = edl_track_joined(track.fragments,track.protocol)
-                    if track.acodec and track.acodec ~= "none" then
-                        -- audio track
-                        mp.commandv("audio-add",
-                            edl_track or track.url, "auto",
-                            track.format_note or "")
-                    elseif track.vcodec and track.vcodec ~= "none" then
-                        -- video track
-                        streamurl = edl_track or track.url
-                    end
+                msg.info("Using DASH, expect inaccurate duration.")
+                if not (json.duration == nil) then
+                    msg.info("Actual duration: " .. mp.format_time(json.duration))
                 end
 
-            elseif not (json.url == nil) then
-                local edl_track = nil
-                edl_track = edl_track_joined(json.fragments, json.protocol)
+                -- video url
+                streamurl = json["requested_formats"][1].url
 
-                -- normal video or single track
-                streamurl = edl_track or json.url
+                -- audio url
+                mp.set_property("file-local-options/audio-file",
+                    json["requested_formats"][2].url)
+
+                -- workaround for slow startup (causes inaccurate duration)
+                mp.set_property("file-local-options/demuxer-lavf-o",
+                    "fflags=+ignidx")
+
+            elseif not (json.url == nil) then
+                -- normal video
+                streamurl = json.url
                 set_http_headers(json.http_headers)
             else
                 msg.error("No URL found in JSON data.")
@@ -329,7 +233,7 @@ mp.add_hook("on_load", 10, function ()
 
             msg.debug("streamurl: " .. streamurl)
 
-            mp.set_property("stream-open-filename", streamurl:gsub("^data:", "data://", 1))
+            mp.set_property("stream-open-filename", streamurl)
 
             mp.set_property("file-local-options/force-media-title", json.title)
 
@@ -347,7 +251,7 @@ mp.add_hook("on_load", 10, function ()
                     end
 
                     if not (sub == nil) then
-                        mp.commandv("sub-add", sub,
+                        mp.commandv("sub_add", sub,
                             "auto", sub_info.ext, lang)
                     else
                         msg.verbose("No subtitle data/url for ["..lang.."]")
@@ -355,50 +259,22 @@ mp.add_hook("on_load", 10, function ()
                 end
             end
 
-            -- add chapters from description
-            if not (json.description == nil) and not (json.duration == nil) then
-                chapter_list = extract_chapters(json.description, json.duration)
-            end
-
-            -- set start time
+            -- set start and end time
             if not (json.start_time == nil) then
-                msg.debug("Setting start to: " .. json.start_time .. " secs")
-                mp.set_property("file-local-options/start", json.start_time)
-            end
-
-            -- set aspect ratio for anamorphic video
-            if not (json.stretched_ratio == nil) and
-                not option_was_set("video-aspect") then
-                mp.set_property('file-local-options/video-aspect', json.stretched_ratio)
+                msg.debug("setting start to: " .. json.start_time .. " secs")
+                mp.set_property("file-local-options/start",json.start_time)
             end
 
             -- for rtmp
-            if (json.protocol == "rtmp") then
-                local rtmp_prop = append_rtmp_prop(nil,
-                    "rtmp_tcurl", streamurl)
-                rtmp_prop = append_rtmp_prop(rtmp_prop,
-                    "rtmp_pageurl", json.page_url)
-                rtmp_prop = append_rtmp_prop(rtmp_prop,
-                    "rtmp_playpath", json.play_path)
-                rtmp_prop = append_rtmp_prop(rtmp_prop,
-                    "rtmp_swfverify", json.player_url)
-                rtmp_prop = append_rtmp_prop(rtmp_prop,
-                    "rtmp_swfurl", json.player_url)
-                rtmp_prop = append_rtmp_prop(rtmp_prop,
-                    "rtmp_app", json.app)
+            if not (json.play_path == nil) then
+                local rtmp_prop = append_rtmp_prop(nil, "rtmp_tcurl", streamurl)
+                rtmp_prop = append_rtmp_prop(rtmp_prop, "rtmp_pageurl", json.page_url)
+                rtmp_prop = append_rtmp_prop(rtmp_prop, "rtmp_playpath", json.play_path)
+                rtmp_prop = append_rtmp_prop(rtmp_prop, "rtmp_swfverify", json.player_url)
+                rtmp_prop = append_rtmp_prop(rtmp_prop, "rtmp_app", json.app)
 
                 mp.set_property("file-local-options/stream-lavf-o", rtmp_prop)
             end
         end
-    end
-end)
-
-
-mp.add_hook("on_preloaded", 10, function ()
-    if next(chapter_list) ~= nil then
-        msg.verbose("Setting chapters from video's description")
-
-        mp.set_property_native("chapter-list", chapter_list)
-        chapter_list = {}
     end
 end)

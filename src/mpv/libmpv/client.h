@@ -49,30 +49,13 @@ extern "C" {
  * 2) Using mpv as a library with mpv_create(). This basically allows embedding
  *    mpv in other applications.
  *
- * Documentation
- * -------------
- *
- * The libmpv C API is documented directly in this header. Note that most
- * actual interaction with this player is done through
- * options/commands/properties, which can be accessed through this API.
- * Essentially everything is done with them, including loading a file,
- * retrieving playback progress, and so on.
- *
- * These are documented elsewhere:
- *      * http://mpv.io/manual/master/#options
- *      * http://mpv.io/manual/master/#list-of-input-commands
- *      * http://mpv.io/manual/master/#properties
- *
- * You can also look at the examples here:
- *      * https://github.com/mpv-player/mpv-examples/tree/master/libmpv
- *
  * Event loop
  * ----------
  *
  * In general, the API user should run an event loop in order to receive events.
- * This event loop should call mpv_wait_event(), which will return once a new
- * mpv client API is available. It is also possible to integrate client API
- * usage in other event loops (e.g. GUI toolkits) with the
+ * This even loop should call mpv_wait_event(), which will return once a new
+ * mpv client API is available. It should also be possible to integrate client
+ * API usage in other event loops (e.g. GUI toolkits) with the
  * mpv_set_wakeup_callback() function, and then polling for events by calling
  * mpv_wait_event() with a 0 timeout.
  *
@@ -135,6 +118,10 @@ extern "C" {
  *   (used through libass), ALSA, FFmpeg, and possibly more.
  * - The FPU precision must be set at least to double precision.
  * - On Windows, mpv will call timeBeginPeriod(1).
+ * - On UNIX, every mpv_initialize() call will block SIGPIPE. This is done
+ *   because FFmpeg makes unsafe use of OpenSSL and GnuTLS, which can raise
+ *   this signal under certain circumstances. Once these libraries (or FFmpeg)
+ *   are fixed, libmpv will not block the signal anymore.
  * - On memory exhaustion, mpv will kill the process.
  *
  * Encoding of filenames
@@ -211,7 +198,7 @@ extern "C" {
  * relational operators (<, >, <=, >=).
  */
 #define MPV_MAKE_VERSION(major, minor) (((major) << 16) | (minor) | 0UL)
-#define MPV_CLIENT_API_VERSION MPV_MAKE_VERSION(1, 24)
+#define MPV_CLIENT_API_VERSION MPV_MAKE_VERSION(1, 19)
 
 /**
  * Return the MPV_CLIENT_API_VERSION the mpv source has been compiled with.
@@ -244,7 +231,7 @@ typedef enum mpv_error {
      * making asynchronous requests. (Bugs in the client API implementation
      * could also trigger this, e.g. if events become "lost".)
      */
-    MPV_ERROR_EVENT_QUEUE_FULL  = -1,
+    MPV_ERROR_EVENT_QUEUE_FULL = -1,
     /**
      * Memory allocation failed.
      */
@@ -295,7 +282,7 @@ typedef enum mpv_error {
      */
     MPV_ERROR_COMMAND           = -12,
     /**
-     * Generic error on loading (usually used with mpv_event_end_file.error).
+     * Generic error on loading (used with mpv_event_end_file.error).
      */
     MPV_ERROR_LOADING_FAILED    = -13,
     /**
@@ -325,11 +312,7 @@ typedef enum mpv_error {
     /**
      * The API function which was called is a stub only.
      */
-    MPV_ERROR_NOT_IMPLEMENTED   = -19,
-    /**
-     * Unspecified error.
-     */
-    MPV_ERROR_GENERIC           = -20
+    MPV_ERROR_NOT_IMPLEMENTED   = -19
 } mpv_error;
 
 /**
@@ -366,11 +349,10 @@ const char *mpv_client_name(mpv_handle *ctx);
  * and needs to be initialized to be actually used with most other API
  * functions.
  *
- * Some API functions will return MPV_ERROR_UNINITIALIZED in the uninitialized
- * state. You can call mpv_set_property() (or mpv_set_property_string() and
- * other variants, and before mpv 0.21.0 mpv_set_option() etc.) to set initial
- * options. After this, call mpv_initialize() to start the player, and then use
- * e.g. mpv_command() to start playback of a file.
+ * Most API functions will return MPV_ERROR_UNINITIALIZED in the uninitialized
+ * state. You can call mpv_set_option() (or mpv_set_option_string() and other
+ * variants) to set initial options. After this, call mpv_initialize() to start
+ * the player, and then use e.g. mpv_command() to start playback of a file.
  *
  * The point of separating handle creation and actual initialization is that
  * you can configure things which can't be changed during runtime.
@@ -398,17 +380,14 @@ const char *mpv_client_name(mpv_handle *ctx);
  * options.
  *
  * The mpv command line parser is not available through this API, but you can
- * set individual options with mpv_set_property(). Files for playback must be
+ * set individual options with mpv_set_option(). Files for playback must be
  * loaded with mpv_command() or others.
  *
  * Note that you should avoid doing concurrent accesses on the uninitialized
  * client handle. (Whether concurrent access is definitely allowed or not has
  * yet to be decided.)
  *
- * @return a new mpv client API handle. Returns NULL on error. Currently, this
- *         can happen in the following situations:
- *         - out of memory
- *         - LC_NUMERIC is not set to "C" (see general remarks)
+ * @return a new mpv client API handle
  */
 mpv_handle *mpv_create(void);
 
@@ -418,17 +397,6 @@ mpv_handle *mpv_create(void);
  *
  * This function needs to be called to make full use of the client API if the
  * client API handle was created with mpv_create().
- *
- * Only the following options require to be set _before_ mpv_initialize():
- *      - options which are only read at initialization time:
- *        - config
- *        - config-dir
- *        - input-conf
- *        - load-scripts
- *        - script
- *        - player-operation-mode
- *        - input-app-events (OSX)
- *      - all encoding mode options
  *
  * @return error code
  */
@@ -500,15 +468,16 @@ mpv_handle *mpv_create_client(mpv_handle *ctx, const char *name);
  * possible that some options were successfully set even if any of these errors
  * happen.
  *
+ * The same restrictions as with mpv_set_option() apply: some options can't
+ * be set outside of idle or uninitialized state, and many options don't
+ * take effect immediately.
+ *
  * @param filename absolute path to the config file on the local filesystem
  * @return error code
  */
 int mpv_load_config_file(mpv_handle *ctx, const char *filename);
 
 /**
- * This does nothing since mpv 0.23.0 (API version 1.24). Below is the
- * description of the old behavior.
- *
  * Stop the playback thread. This means the core will stop doing anything, and
  * only run and answer to client API requests. This is sometimes useful; for
  * example, no new frame will be queued to the video output, so doing requests
@@ -525,11 +494,6 @@ int mpv_load_config_file(mpv_handle *ctx, const char *filename);
  * mpv_suspend() is not allowed.
  *
  * Calling this on an uninitialized player (see mpv_create()) will deadlock.
- *
- * @deprecated This function, as well as mpv_resume(), are deprecated, and
- *             will stop doing anything soon. Their semantics were never
- *             well-defined, and their usefulness is extremely limited. The
- *             calls will remain stubs in order to keep ABI compatibility.
  */
 void mpv_suspend(mpv_handle *ctx);
 
@@ -622,7 +586,7 @@ typedef enum mpv_format {
      * Example for writing:
      *
      *     int flag = 1;
-     *     mpv_set_property(ctx, "property", MPV_FORMAT_FLAG, &flag);
+     *     mpv_set_property(ctx, "property", MPV_FORMAT_STRING, &flag);
      */
     MPV_FORMAT_FLAG             = 3,
     /**
@@ -676,7 +640,7 @@ typedef enum mpv_format {
     MPV_FORMAT_NODE_MAP         = 8,
     /**
      * A raw, untyped byte array. Only used only with mpv_node, and only in
-     * some very special situations. (Currently, only for the screenshot-raw
+     * some very special situations. (Currently, only for the screenshot_raw
      * command.)
      */
     MPV_FORMAT_BYTE_ARRAY       = 9
@@ -790,35 +754,11 @@ void mpv_free_node_contents(mpv_node *node);
  * works in uninitialized state (see mpv_create()), and in some cases in at
  * runtime.
  *
- * Using a format other than MPV_FORMAT_NODE is equivalent to constructing a
- * mpv_node with the given format and data, and passing the mpv_node to this
- * function.
- *
- * Note: this is semi-deprecated. For most purposes, this is not needed anymore.
- *       Starting with mpv version 0.21.0 (version 1.23) most options can be set
- *       with mpv_set_property() (and related functions), and even before
- *       mpv_initialize(). In some obscure corner cases, using this function
- *       to set options might still be required (see below, and also section
- *       "Inconsistencies between options and properties" on the manpage). Once
- *       these are resolved, the option setting functions might be fully
- *       deprecated.
- *
- *       The following options still need to be set either _before_
- *       mpv_initialize() with mpv_set_property() (or related functions), or
- *       with mpv_set_option() (or related functions) at any time:
- *              - options shadowed by deprecated properties:
- *                - demuxer (property deprecated in 0.21.0)
- *                - idle (property deprecated in 0.21.0)
- *                - fps (property deprecated in 0.21.0)
- *                - cache (property deprecated in 0.21.0)
- *                - length (property deprecated in 0.10.0)
- *                - audio-samplerate (property deprecated in 0.10.0)
- *                - audio-channels (property deprecated in 0.10.0)
- *                - audio-format (property deprecated in 0.10.0)
- *              - deprecated options shadowed by properties:
- *                - chapter (option deprecated in 0.21.0)
- *                - playlist-pos (option deprecated in 0.21.0)
- *       The deprecated properties will be removed in mpv 0.23.0.
+ * Changing options at runtime does not always work. For some options, attempts
+ * to change them simply fails. Many other options may require reloading the
+ * file for changes to take effect. In general, you should prefer calling
+ * mpv_set_property() to change settings during playback, because the property
+ * mechanism guarantees that changes take effect immediately.
  *
  * @param name Option name. This is the same as on the mpv command line, but
  *             without the leading "--".
@@ -864,7 +804,8 @@ int mpv_command(mpv_handle *ctx, const char **args);
  *                    function succeeds, this is set to command-specific return
  *                    data. You must call mpv_free_node_contents() to free it
  *                    (again, only if the command actually succeeds).
- *                    Not many commands actually use this at all.
+ *                    Currently, no command uses this, but that can change in
+ *                    the future.
  * @return error code (the result parameter is not set on error)
  */
 int mpv_command_node(mpv_handle *ctx, mpv_node *args, mpv_node *result);
@@ -916,22 +857,7 @@ int mpv_command_node_async(mpv_handle *ctx, uint64_t reply_userdata,
  * usually will fail with MPV_ERROR_PROPERTY_FORMAT. In some cases, the data
  * is automatically converted and access succeeds. For example, MPV_FORMAT_INT64
  * is always converted to MPV_FORMAT_DOUBLE, and access using MPV_FORMAT_STRING
- * usually invokes a string parser. The same happens when calling this function
- * with MPV_FORMAT_NODE: the underlying format may be converted to another
- * type if possible.
- *
- * Using a format other than MPV_FORMAT_NODE is equivalent to constructing a
- * mpv_node with the given format and data, and passing the mpv_node to this
- * function. (Before API version 1.21, this was different.)
- *
- * Note: starting with mpv 0.21.0 (client API version 1.23), this can be used to
- *       set options in general. It even can be used before mpv_initialize()
- *       has been called. If called before mpv_initialize(), setting properties
- *       not backed by options will result in MPV_ERROR_PROPERTY_UNAVAILABLE.
- *       In some cases, properties and options still conflict. In these cases,
- *       mpv_set_property() accesses the options before mpv_initialize(), and
- *       the properties after mpv_initialize(). These conflicts will be removed
- *       in mpv 0.23.0. See mpv_set_option() for further remarks.
+ * usually invokes a string parser.
  *
  * @param name The property name. See input.rst for a list of properties.
  * @param format see enum mpv_format.
@@ -1192,13 +1118,13 @@ typedef enum mpv_event_id {
      * @deprecated This was used internally with the internal "script_dispatch"
      *             command to dispatch keyboard and mouse input for the OSC.
      *             It was never useful in general and has been completely
-     *             replaced with "script-binding".
+     *             replaced with "script_binding".
      *             This event never happens anymore, and is included in this
      *             header only for compatibility.
      */
     MPV_EVENT_SCRIPT_INPUT_DISPATCH = 15,
     /**
-     * Triggered by the script-message input command. The command uses the
+     * Triggered by the script_message input command. The command uses the
      * first argument of the command as client name (see mpv_client_name()) to
      * dispatch the message, and passes along all arguments starting from the
      * second argument as strings.
@@ -1490,7 +1416,7 @@ int mpv_request_event(mpv_handle *ctx, mpv_event_id event, int enable);
  * required log level for a message to be received with MPV_EVENT_LOG_MESSAGE.
  *
  * @param min_level Minimal log level as string. Valid log levels:
- *                      no fatal error warn info v debug trace
+ *                      no fatal error warn info status v debug trace
  *                  The value "no" disables all messages. This is the default.
  *                  An exception is the value "terminal-default", which uses the
  *                  log level as set by the "--msg-level" option. This works

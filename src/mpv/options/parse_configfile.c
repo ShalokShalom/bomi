@@ -128,11 +128,15 @@ int m_config_parse(m_config_t *config, const char *location, bstr data,
         }
 
         int res;
-        if (bstr_equals0(option, "profile-desc")) {
-            m_profile_set_desc(profile, value);
-            res = 0;
+        if (profile) {
+            if (bstr_equals0(option, "profile-desc")) {
+                m_profile_set_desc(profile, value);
+                res = 0;
+            } else {
+                res = m_config_set_profile_option(config, profile, option, value);
+            }
         } else {
-            res = m_config_set_profile_option(config, profile, option, value);
+            res = m_config_set_option_ext(config, option, value, flags);
         }
         if (res < 0) {
             MP_ERR(config, "%s setting option %.*s='%.*s' failed.\n",
@@ -149,9 +153,6 @@ int m_config_parse(m_config_t *config, const char *location, bstr data,
             break;
         }
     }
-
-    if (config->recursion_depth == 0)
-        m_config_finish_default_profile(config, flags);
 
     talloc_free(tmp);
     return 1;

@@ -27,7 +27,7 @@
 
 #include <libavutil/common.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "options/m_option.h"
 #include "audio/format.h"
@@ -152,6 +152,8 @@ static int init(struct ao *ao)
             priv->outputfilename,
             priv->waveheader ? "WAVE" : "RAW PCM", ao->samplerate,
             ao->channels.num, af_fmt_to_str(ao->format));
+    MP_INFO(ao, "Info: Faster dumping is achieved with --no-video\n");
+    MP_INFO(ao, "Info: To write WAVE files use --ao=pcm:waveheader (default).\n");
 
     priv->fp = fopen(priv->outputfilename, priv->append ? "ab" : "wb");
     if (!priv->fp) {
@@ -224,5 +226,4 @@ const struct ao_driver audio_out_pcm = {
         OPT_FLAG("append", append, 0),
         {0}
     },
-    .options_prefix = "ao-pcm",
 };

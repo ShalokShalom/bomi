@@ -43,8 +43,9 @@ timers added with ``mp.add_timeout`` or similar.
 
 When the player quits, all scripts will be asked to terminate. This happens via
 a ``shutdown`` event, which by default will make the event loop return. If your
-script got into an endless loop, mpv will probably behave fine during playback,
-but it won't terminate when quitting, because it's waiting on your script.
+script got into an endless loop, mpv will probably behave fine during playback
+(unless the player is suspended, see ``mp.suspend``), but it won't terminate
+when quitting, because it's waiting on your script.
 
 Internally, the C code will call the Lua function ``mp_event_loop`` after
 loading a Lua script. This function is normally defined by the default prelude
@@ -174,7 +175,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     Similar to ``mp.set_property``, but set the given property using its native
     type.
 
-    Since there are several data types which cannot represented natively in
+    Since there are several data types which can not represented natively in
     Lua, this might not always work as expected. For example, while the Lua
     wrapper can do some guesswork to decide whether a Lua table is an array
     or a map, this would fail with empty tables. Also, there are not many
@@ -191,14 +192,13 @@ The ``mp`` module is preloaded, although it can be loaded manually with
     Register callback to be run on a key binding. The binding will be mapped to
     the given ``key``, which is a string describing the physical key. This uses
     the same key names as in input.conf, and also allows combinations
-    (e.g. ``ctrl+a``). If the key is empty or ``nil``, no physical key is
-    registered, but the user still can create own bindings (see below).
+    (e.g. ``ctrl+a``).
 
     After calling this function, key presses will cause the function ``fn`` to
     be called (unless the user remapped the key with another binding).
 
     The ``name`` argument should be a short symbolic string. It allows the user
-    to remap the key binding via input.conf using the ``script-message``
+    to remap the key binding via input.conf using the ``script_message``
     command, and the name of the key binding (see below for
     an example). The name should be unique across other bindings in the same
     script - if not, the previous binding with the same name will be
@@ -220,8 +220,8 @@ The ``mp`` module is preloaded, although it can be loaded manually with
             has an ``is_mouse`` entry, which tells whether the event was caused
             by a mouse button.
 
-    Internally, key bindings are dispatched via the ``script-message-to`` or
-    ``script-binding`` input commands and ``mp.register_script_message``.
+    Internally, key bindings are dispatched via the ``script_message_to`` or
+    ``script_binding`` input commands and ``mp.register_script_message``.
 
     Trying to map multiple commands to a key will essentially prefer a random
     binding, while the other bindings are not called. It is guaranteed that
@@ -244,7 +244,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
 
     ::
 
-        y script-binding something
+        y script_binding something
 
 
     This will print the message when the key ``y`` is pressed. (``x`` will
@@ -255,7 +255,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
 
     ::
 
-        y script-binding fooscript/something
+        y script_binding fooscript.something
 
 ``mp.add_forced_key_binding(...)``
     This works almost the same as ``mp.add_key_binding``, but registers the
@@ -349,10 +349,6 @@ The ``mp`` module is preloaded, although it can be loaded manually with
             with ``add_timeout()``), this starts the timer from the beginning,
             using the initially configured timeout.
 
-        ``is_enabled()``
-            Whether the timer is currently enabled or was previously disabled
-            (e.g. by ``stop()`` or ``kill()``).
-
         ``timeout`` (RW)
             This field contains the current timeout period. This value is not
             updated as time progresses. It's only used to calculate when the
@@ -393,7 +389,7 @@ The ``mp`` module is preloaded, although it can be loaded manually with
 ``mp.get_script_name()``
     Return the name of the current script. The name is usually made of the
     filename of the script, with directory and file extension removed. If
-    there are several scripts which would have the same name, it's made unique
+    there are several script which would have the same name, it's made unique
     by appending a number.
 
     .. admonition:: Example
@@ -411,16 +407,25 @@ These also live in the ``mp`` module, but are documented separately as they
 are useful only in special situations.
 
 ``mp.suspend()``
-    This function has been deprecated in mpv 0.21.0 and does nothing starting
-    with mpv 0.23.0 (no replacement).
+    Suspend the mpv main loop. There is a long-winded explanation of this in
+    the C API function ``mpv_suspend()``. In short, this prevents the player
+    from displaying the next video frame, so that you don't get blocked when
+    trying to access the player.
+
+    This is automatically called by the event handler.
 
 ``mp.resume()``
-    This function has been deprecated in mpv 0.21.0 and does nothing starting
-    with mpv 0.23.0 (no replacement).
+    Undo one ``mp.suspend()`` call. ``mp.suspend()`` increments an internal
+    counter, and ``mp.resume()`` decrements it. When 0 is reached, the player
+    is actually resumed.
 
 ``mp.resume_all()``
-    This function has been deprecated in mpv 0.21.0 and does nothing starting
-    with mpv 0.23.0 (no replacement).
+    This resets the internal suspend counter and resumes the player. (It's
+    like calling ``mp.resume()`` until the player is actually resumed.)
+
+    You might want to call this if you're about to do something that takes a
+    long time, but doesn't really need access to the player (like a network
+    operation). Note that you still can access the player at any time.
 
 ``mp.get_wakeup_pipe()``
     Calls ``mpv_get_wakeup_pipe()`` and returns the read end of the wakeup
@@ -444,17 +449,7 @@ are useful only in special situations.
     ``mp.get_wakeup_pipe()`` if you're interested in properly working
     notification of new events and working timers.
 
-``mp.register_idle(fn)``
-    Register an event loop idle handler. Idle handlers are called before the
-    script goes to sleep after handling all new events. This can be used for
-    example to delay processing of property change events: if you're observing
-    multiple properties at once, you might not want to act on each property
-    change, but only when all change notifications have been received.
-
-``mp.unregister_idle(fn)``
-    Undo ``mp.register_idle(fn)``. This removes all idle handlers that
-    are equal to the ``fn`` parameter. This uses normal Lua ``==`` comparison,
-    so be careful when dealing with closures.
+    This function calls ``mp.suspend()`` and ``mp.resume_all()`` on its own.
 
 ``mp.enable_messages(level)``
     Set the minimum log level of which mpv message output to receive. These
@@ -464,9 +459,9 @@ are useful only in special situations.
     The level is a string, see ``msg.log`` for allowed log levels.
 
 ``mp.register_script_message(name, fn)``
-    This is a helper to dispatch ``script-message`` or ``script-message-to``
-    invocations to Lua functions. ``fn`` is called if ``script-message`` or
-    ``script-message-to`` (with this script as destination) is run
+    This is a helper to dispatch ``script_message`` or ``script_message_to``
+    invocations to Lua functions. ``fn`` is called if ``script_message`` or
+    ``script_message_to`` (with this script as destination) is run
     with ``name`` as first parameter. The other parameters are passed to ``fn``.
     If a message with the given name is already registered, it's overwritten.
 
@@ -547,8 +542,8 @@ Example command-line::
      --script-opts=myscript-optionA=TEST,myscript-optionB=0,myscript-optionC=yes
 
 
-mp.utils functions
-------------------
+mp.utils options
+----------------
 
 This built-in module provides generic helper functions for Lua, and have
 strictly speaking nothing to do with mpv or video/audio playback. They are
@@ -639,16 +634,7 @@ strictly part of the guaranteed API.
             Set to ``true`` if the process has been killed by mpv as a result
             of ``cancellable`` being set to ``true``.
 
-``utils.subprocess_detached(t)``
-    Runs an external process and detaches it from mpv's control.
-
-    The parameter ``t`` is a table. The function reads the following entries:
-
-        ``args``
-            Array of strings of the same semantics as the ``args`` used in the
-            ``subprocess`` function.
-
-    The function returns ``nil``.
+    In all cases, ``mp.resume_all()`` is implicitly called.
 
 ``utils.parse_json(str [, trail])``
     Parses the given string argument as JSON, and returns it as a Lua table. On

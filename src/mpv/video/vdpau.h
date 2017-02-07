@@ -23,9 +23,6 @@
 #define CHECK_VDP_ERROR(ctx, message) \
     CHECK_VDP_ERROR_ST(ctx, message, return -1;)
 
-#define CHECK_VDP_ERROR_NORETURN(ctx, message) \
-    CHECK_VDP_ERROR_ST(ctx, message, ;)
-
 #define CHECK_VDP_WARNING(ctx, message) \
     do { \
         if (vdp_st != VDP_STATUS_OK) \
@@ -48,7 +45,6 @@ struct mp_vdpau_ctx {
     Display *x11;
 
     struct mp_hwdec_ctx hwctx;
-    struct AVBufferRef *av_device_ref;
 
     // These are mostly immutable, except on preemption. We don't really care
     // to synchronize the preemption case fully correctly, because it's an
@@ -63,7 +59,6 @@ struct mp_vdpau_ctx {
     uint64_t preemption_counter;        // incremented after _restoring_
     bool preemption_user_notified;
     double last_preemption_retry_fail;
-    VdpOutputSurface preemption_obj;    // dummy for reliable preempt. check
 
     // Surface pool
     pthread_mutex_t pool_lock;

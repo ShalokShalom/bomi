@@ -18,12 +18,11 @@
 #import <Cocoa/Cocoa.h>
 #import "video/out/cocoa/mpvadapter.h"
 
-@protocol MpvWindowUpdate
+@protocol MpvSizing
 - (void)queueNewVideoSize:(NSSize)newSize;
-- (void)updateBorder:(int)border;
 @end
 
-@interface MpvVideoWindow : NSWindow <NSWindowDelegate, MpvWindowUpdate>
+@interface MpvVideoWindow : NSWindow <NSWindowDelegate, MpvSizing>
 @property(nonatomic, retain) MpvCocoaAdapter *adapter;
 - (BOOL)canBecomeKeyWindow;
 - (BOOL)canBecomeMainWindow;

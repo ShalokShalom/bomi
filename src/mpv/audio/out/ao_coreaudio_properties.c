@@ -21,7 +21,7 @@
 
 #include "audio/out/ao_coreaudio_properties.h"
 #include "audio/out/ao_coreaudio_utils.h"
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 OSStatus ca_get(AudioObjectID id, ca_scope scope, ca_sel selector,
                 uint32_t size, void *data)
@@ -70,7 +70,7 @@ OSStatus ca_get_ary(AudioObjectID id, ca_scope scope, ca_sel selector,
 
     return err;
 coreaudio_error_free:
-    talloc_free(*data);
+    free(*data);
 coreaudio_error:
     return err;
 }

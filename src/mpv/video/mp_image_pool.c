@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "config.h"
@@ -23,15 +23,12 @@
 #include <assert.h>
 
 #include <libavutil/buffer.h>
-#include <libavutil/hwcontext.h>
-#include <libavutil/mem.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "common/common.h"
+#include "video/mp_image.h"
 
-#include "fmt-conversion.h"
-#include "mp_image.h"
 #include "mp_image_pool.h"
 
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -167,14 +164,6 @@ struct mp_image *mp_image_pool_get_no_alloc(struct mp_image_pool *pool, int fmt,
     return ref;
 }
 
-void mp_image_pool_add(struct mp_image_pool *pool, struct mp_image *new)
-{
-    struct image_flags *it = talloc_ptrtype(new, it);
-    *it = (struct image_flags) { .pool_alive = true };
-    new->priv = it;
-    MP_TARRAY_APPEND(pool, pool->images, pool->num_images, new);
-}
-
 // Return a new image of given format/size. The only difference to
 // mp_image_alloc() is that there is a transparent mechanism to recycle image
 // data allocations through this pool.
@@ -197,7 +186,10 @@ struct mp_image *mp_image_pool_get(struct mp_image_pool *pool, int fmt,
         }
         if (!new)
             return NULL;
-        mp_image_pool_add(pool, new);
+        struct image_flags *it = talloc_ptrtype(new, it);
+        *it = (struct image_flags) { .pool_alive = true };
+        new->priv = it;
+        MP_TARRAY_APPEND(pool, pool->images, pool->num_images, new);
         new = mp_image_pool_get_no_alloc(pool, fmt, w, h);
     }
     return new;
@@ -249,63 +241,4 @@ void mp_image_pool_set_allocator(struct mp_image_pool *pool,
 void mp_image_pool_set_lru(struct mp_image_pool *pool)
 {
     pool->use_lru = true;
-}
-
-
-// Copies the contents of the HW surface img to system memory and retuns it.
-// If swpool is not NULL, it's used to allocate the target image.
-// img must be a hw surface with a AVHWFramesContext attached. If not, you
-// must use the legacy mp_hwdec_ctx.download_image.
-// The returned image is cropped as needed.
-// Returns NULL on failure.
-struct mp_image *mp_image_hw_download(struct mp_image *src,
-                                      struct mp_image_pool *swpool)
-{
-    if (!src->hwctx)
-        return NULL;
-    AVHWFramesContext *fctx = (void *)src->hwctx->data;
-
-    // Try to find the first format which we can apparently use.
-    int imgfmt = 0;
-    enum AVPixelFormat *fmts;
-    if (av_hwframe_transfer_get_formats(src->hwctx,
-            AV_HWFRAME_TRANSFER_DIRECTION_FROM, &fmts, 0) < 0)
-        return NULL;
-    for (int n = 0; fmts[n] != AV_PIX_FMT_NONE; n++) {
-        imgfmt = pixfmt2imgfmt(fmts[n]);
-        if (imgfmt)
-            break;
-    }
-    av_free(fmts);
-
-    if (!imgfmt)
-        return NULL;
-
-    struct mp_image *dst =
-        mp_image_pool_get(swpool, imgfmt, fctx->width, fctx->height);
-    if (!dst)
-        return NULL;
-
-    // Target image must be writable, so unref it.
-    AVFrame *dstav = mp_image_to_av_frame_and_unref(dst);
-    if (!dstav)
-        return NULL;
-
-    AVFrame *srcav = mp_image_to_av_frame(src);
-    if (!srcav) {
-        av_frame_unref(dstav);
-        return NULL;
-    }
-
-    int res = av_hwframe_transfer_data(dstav, srcav, 0);
-    av_frame_unref(srcav);
-    dst = mp_image_from_av_frame(dstav);
-    av_frame_unref(dstav);
-    if (res >= 0) {
-        mp_image_set_size(dst, src->w, src->h);
-        mp_image_copy_attributes(dst, src);
-    } else {
-        mp_image_unrefp(&dst);
-    }
-    return dst;
 }

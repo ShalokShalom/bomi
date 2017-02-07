@@ -1,18 +1,23 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * You can alternatively redistribute this file and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  */
 
 #ifdef MP_GET_GL_WORKAROUNDS
@@ -60,73 +65,6 @@
 #define GL_DEBUG_SEVERITY_MEDIUM          0x9147
 #define GL_DEBUG_SEVERITY_LOW             0x9148
 #define GL_DEBUG_SEVERITY_NOTIFICATION    0x826B
-#endif
-
-#ifndef GL_BACK_LEFT
-#define GL_BACK_LEFT                      0x0402
-#endif
-
-#if HAVE_ANDROID_GL
-#define GL_UNSIGNED_BYTE_3_3_2            0x8032
-#define GL_UNSIGNED_BYTE_2_3_3_REV        0x8362
-#define GL_UNSIGNED_SHORT_1_5_5_5_REV     0x8366
-#define GL_UNSIGNED_SHORT_5_6_5_REV       0x8364
-#define GL_RGB_422_APPLE 0x8A1F
-#define GL_BGR 0x80E0
-#define GL_BGRA 0x80E1
-#define GL_TEXTURE_1D 0x0DE0
-#define GL_WRITE_ONLY 0x88B9
-#define GL_RGB16 0x8054
-#define GL_RGB10 0x8052
-#define GL_RGBA12 0x805A
-#define GL_RGBA16 0x805B
-#define GL_TEXTURE_RED_SIZE 0x805C
-#define GL_TEXTURE_LUMINANCE_SIZE 0x8060
-#define GL_R16 0x822A
-#define GL_RG16 0x822C
-#define GL_LUMINANCE8 0x8040
-#define GL_LUMINANCE8_ALPHA8 0x8045
-#define GL_LUMINANCE16 0x8042
-#define GL_LUMINANCE16_ALPHA16 0x8048
-#define GL_UNSIGNED_SHORT_8_8_APPLE 0x85BA
-#define GL_UNSIGNED_SHORT_8_8_REV_APPLE 0x85BB
-#endif
-
-#if HAVE_IOS_GL
-#define GL_WRITE_ONLY GL_WRITE_ONLY_OES
-#define GL_TEXTURE_1D 0x0DE0
-#define GL_R16 0x822A
-#define GL_RG16 0x822C
-#define GL_RGB10 0x8052
-#define GL_RGB16 0x8054
-#define GL_RGBA12 0x805A
-#define GL_RGBA16 0x805B
-#define GL_LUMINANCE8 GL_LUMINANCE8_EXT
-#define GL_LUMINANCE8_ALPHA8 GL_LUMINANCE8_ALPHA8_EXT
-#define GL_LUMINANCE16 0x8042
-#define GL_LUMINANCE16_ALPHA16 0x8048
-#define GL_TEXTURE_RED_SIZE 0x805C
-#define GL_TEXTURE_LUMINANCE_SIZE 0x8060
-#endif
-
-// GL_ARB_timer_query and EXT_disjoint_timer_query
-#ifndef GL_TIME_ELAPSED
-// Same as GL_TIME_ELAPSED_EXT
-#define GL_TIME_ELAPSED 0x88BF
-#endif
-
-// GL_OES_EGL_image_external, GL_NV_EGL_stream_consumer_external
-#ifndef GL_TEXTURE_EXTERNAL_OES
-#define GL_TEXTURE_EXTERNAL_OES 0x8D65
-#endif
-
-// GL_ANGLE_translated_shader_source
-#ifndef GL_TRANSLATED_SHADER_SOURCE_LENGTH_ANGLE
-#define GL_TRANSLATED_SHADER_SOURCE_LENGTH_ANGLE 0x93A0
-#endif
-
-#ifndef GL_RGB_RAW_422_APPLE
-#define GL_RGB_RAW_422_APPLE 0x8A51
 #endif
 
 #undef MP_GET_GL_WORKAROUNDS

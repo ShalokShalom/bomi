@@ -35,7 +35,7 @@
 #include "osdep/io.h"
 
 #include "config.h"
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "common/common.h"
 #include "common/msg.h"
 
@@ -45,7 +45,7 @@
 #define FIRST_PCM_AID 160
 
 #include "stream.h"
-#include "options/m_config.h"
+#include "options/m_option.h"
 #include "options/options.h"
 #include "options/path.h"
 
@@ -108,6 +108,18 @@ typedef struct {
   int cfg_title;
   char *cfg_device;
 } dvd_priv_t;
+
+static const dvd_priv_t stream_priv_dflts = {
+  .cfg_title = 0,
+};
+
+#define OPT_BASE_STRUCT dvd_priv_t
+/// URL definition
+static const m_option_t stream_opts_fields[] = {
+    OPT_INTRANGE("title", cfg_title, 0, 0, 99),
+    OPT_STRING("device", cfg_device, 0),
+    {0}
+};
 
 static int dvd_lang_from_aid(stream_t *stream, int id) {
   dvd_priv_t *d;
@@ -645,15 +657,12 @@ static int control(stream_t *stream,int cmd,void* arg)
 }
 
 
-static int open_s_internal(stream_t *stream)
+static int open_s(stream_t *stream)
 {
   int k;
   dvd_priv_t *d = stream->priv;
 
-  struct dvd_opts *opts =
-    mp_get_config_group(stream, stream->global, &dvd_conf);
-
-  d->dvd_angle = opts->angle;
+  d->dvd_angle = stream->opts->dvd_angle;
 
   MP_VERBOSE(stream, "URL: %s\n", stream->url);
   d->dvd_title = d->cfg_title + 1;
@@ -671,11 +680,11 @@ static int open_s_internal(stream_t *stream)
      */
     if(d->cfg_device && d->cfg_device[0])
       d->dvd_device_current = d->cfg_device;
-    else if(opts->device && opts->device[0])
-      d->dvd_device_current = talloc_strdup(stream, opts->device);
+    else if(stream->opts->dvd_device && stream->opts->dvd_device[0])
+      d->dvd_device_current = talloc_strdup(stream, stream->opts->dvd_device);
     else
       d->dvd_device_current = DEFAULT_DVD_DEVICE;
-    d->dvd_speed = opts->speed;
+    d->dvd_speed = stream->opts->dvd_speed;
     dvd_set_speed(stream,d->dvd_device_current, d->dvd_speed);
 #if defined(__APPLE__) || defined(__DARWIN__)
     /* Dynamic DVD drive selection on Darwin */
@@ -904,6 +913,7 @@ static int open_s_internal(stream_t *stream)
 
     // ... (unimplemented)
     //    return NULL;
+    stream->type = STREAMTYPE_DVD;
     stream->demuxer = "+disc";
     stream->lavf_type = "mpeg";
     stream->sector_size = 2048;
@@ -923,35 +933,11 @@ fail:
   return STREAM_UNSUPPORTED;
 }
 
-static int open_s(stream_t *stream)
-{
-    dvd_priv_t *d = talloc_zero(stream, dvd_priv_t);
-    stream->priv = d;
-
-    bstr title, bdevice;
-    bstr_split_tok(bstr0(stream->path), "/", &title, &bdevice);
-
-    if (title.len) {
-        bstr rest;
-        d->cfg_title = bstrtoll(title, &rest, 10);
-        if (rest.len) {
-            MP_ERR(stream, "number expected: '%.*s'\n", BSTR_P(rest));
-            return STREAM_ERROR;
-        }
-    }
-
-    d->cfg_device = bstrto0(d, bdevice);
-
-    return open_s_internal(stream);
-}
-
 static int ifo_stream_open(stream_t *stream)
 {
-    dvd_priv_t *priv = talloc_zero(stream, dvd_priv_t);
+    dvd_priv_t *priv = talloc_ptrtype(stream, priv);
     stream->priv = priv;
-
-    if (!stream->access_references)
-        goto unsupported;
+    *priv = stream_priv_dflts;
 
     char *path = mp_file_get_path(priv, bstr0(stream->url));
     if (!path)
@@ -972,7 +958,7 @@ static int ifo_stream_open(stream_t *stream)
     priv->cfg_device = bstrto0(priv, mp_dirname(path));
 
     MP_INFO(stream, ".IFO detected. Redirecting to dvdread://\n");
-    return open_s_internal(stream);
+    return open_s(stream);
 
 unsupported:
     talloc_free(priv);
@@ -984,6 +970,14 @@ const stream_info_t stream_info_dvd = {
   .name = "dvd",
   .open = open_s,
   .protocols = (const char*const[]){ "dvdread", NULL },
+  .priv_size = sizeof(dvd_priv_t),
+  .priv_defaults = &stream_priv_dflts,
+  .options = stream_opts_fields,
+  .url_options = (const char*const[]){
+        "hostname=title",
+        "filename=device",
+        NULL
+   },
 };
 
 const stream_info_t stream_info_ifo = {

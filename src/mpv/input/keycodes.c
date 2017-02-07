@@ -36,7 +36,6 @@ struct key_name {
 static const struct key_name key_names[] = {
   { ' ', "SPACE" },
   { '#', "SHARP" },
-  { 0x3000, "IDEOGRAPHIC_SPACE" },
   { MP_KEY_ENTER, "ENTER" },
   { MP_KEY_TAB, "TAB" },
   { MP_KEY_BACKSPACE, "BS" },
@@ -170,8 +169,6 @@ static const struct key_name key_names[] = {
   { MP_KEY_MOUSE_MOVE,  "MOUSE_MOVE" },
   { MP_KEY_MOUSE_LEAVE, "MOUSE_LEAVE" },
   { MP_KEY_MOUSE_ENTER, "MOUSE_ENTER" },
-
-  { MP_KEY_UNMAPPED,    "UNMAPPED" },
 
   { 0, NULL }
 };

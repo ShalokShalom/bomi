@@ -55,11 +55,10 @@ static struct vf_priv_s {
 
 //===========================================================================//
 
-static int reconfig(struct vf_instance *vf, struct mp_image_params *in,
-                    struct mp_image_params *out)
+static int config(struct vf_instance *vf,
+        int width, int height, int d_width, int d_height,
+        unsigned int flags, unsigned int outfmt)
 {
-    int width = in->w, height = in->h;
-
     vf->priv->exp_x = vf->priv->cfg_exp_x;
     vf->priv->exp_y = vf->priv->cfg_exp_y;
     vf->priv->exp_w = vf->priv->cfg_exp_w;
@@ -72,7 +71,7 @@ static int reconfig(struct vf_instance *vf, struct mp_image_params *in,
         else if( vf->priv->exp_h<height ) vf->priv->exp_h=height;
     if (vf->priv->aspect) {
         float adjusted_aspect = vf->priv->aspect;
-        adjusted_aspect *= (double)in->p_w/in->p_h;
+        adjusted_aspect *= ((double)width/height) / ((double)d_width/d_height);
         if (vf->priv->exp_h < vf->priv->exp_w / adjusted_aspect) {
             vf->priv->exp_h = vf->priv->exp_w / adjusted_aspect + 0.5;
         } else {
@@ -87,16 +86,15 @@ static int reconfig(struct vf_instance *vf, struct mp_image_params *in,
     if(vf->priv->exp_x<0 || vf->priv->exp_x+width>vf->priv->exp_w) vf->priv->exp_x=(vf->priv->exp_w-width)/2;
     if(vf->priv->exp_y<0 || vf->priv->exp_y+height>vf->priv->exp_h) vf->priv->exp_y=(vf->priv->exp_h-height)/2;
 
-    struct mp_imgfmt_desc fmt = mp_imgfmt_get_desc(in->imgfmt);
+    struct mp_imgfmt_desc fmt = mp_imgfmt_get_desc(outfmt);
 
     vf->priv->exp_x = MP_ALIGN_DOWN(vf->priv->exp_x, fmt.align_x);
     vf->priv->exp_y = MP_ALIGN_DOWN(vf->priv->exp_y, fmt.align_y);
 
-    *out = *in;
-    out->w = vf->priv->exp_w;
-    out->h = vf->priv->exp_h;
+    vf_rescale_dsize(&d_width, &d_height, width, height,
+                     vf->priv->exp_w, vf->priv->exp_h);
 
-    return 0;
+    return vf_next_config(vf,vf->priv->exp_w,vf->priv->exp_h,d_width,d_height,flags,outfmt);
 }
 
 static struct mp_image *filter(struct vf_instance *vf, struct mp_image *mpi)
@@ -142,7 +140,7 @@ static int query_format(struct vf_instance *vf, unsigned int fmt)
 }
 
 static int vf_open(vf_instance_t *vf){
-    vf->reconfig=reconfig;
+    vf->config=config;
     vf->query_format=query_format;
     vf->filter=filter;
     return 1;

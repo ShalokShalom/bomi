@@ -1,29 +1,39 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * You can alternatively redistribute this file and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  */
 
 #include <stdlib.h>
 #include <assert.h>
-#include <limits.h>
-
 #include <libavutil/common.h>
 
-#include "formats.h"
+#include "video/out/bitmap_packer.h"
+
 #include "utils.h"
 #include "osd.h"
+
+struct osd_fmt_entry {
+    GLint internal_format;
+    GLint format;
+    GLenum type;
+};
 
 // glBlendFuncSeparate() arguments
 static const int blend_factors[SUBBITMAP_COUNT][4] = {
@@ -31,6 +41,21 @@ static const int blend_factors[SUBBITMAP_COUNT][4] = {
                           GL_ONE,       GL_ONE_MINUS_SRC_ALPHA},
     [SUBBITMAP_RGBA] =   {GL_ONE,       GL_ONE_MINUS_SRC_ALPHA,
                           GL_ONE,       GL_ONE_MINUS_SRC_ALPHA},
+};
+
+static const struct osd_fmt_entry osd_to_gl3_formats[SUBBITMAP_COUNT] = {
+    [SUBBITMAP_LIBASS] = {GL_RED,   GL_RED,   GL_UNSIGNED_BYTE},
+    [SUBBITMAP_RGBA] =   {GL_RGBA,  GL_RGBA,  GL_UNSIGNED_BYTE},
+};
+
+static const struct osd_fmt_entry osd_to_gles3_formats[SUBBITMAP_COUNT] = {
+    [SUBBITMAP_LIBASS] = {GL_R8,    GL_RED,   GL_UNSIGNED_BYTE},
+    [SUBBITMAP_RGBA] =   {GL_RGBA8, GL_RGBA,  GL_UNSIGNED_BYTE},
+};
+
+static const struct osd_fmt_entry osd_to_gl2_formats[SUBBITMAP_COUNT] = {
+    [SUBBITMAP_LIBASS] = {GL_LUMINANCE, GL_LUMINANCE,   GL_UNSIGNED_BYTE},
+    [SUBBITMAP_RGBA] =   {GL_RGBA,      GL_RGBA,        GL_UNSIGNED_BYTE},
 };
 
 struct vertex {
@@ -51,11 +76,12 @@ struct mpgl_osd_part {
     int change_id;
     GLuint texture;
     int w, h;
-    struct gl_pbo_upload pbo;
+    GLuint buffer;
     int num_subparts;
     int prev_num_subparts;
     struct sub_bitmap *subparts;
     struct vertex *vertices;
+    struct bitmap_packer *packer;
 };
 
 struct mpgl_osd {
@@ -63,35 +89,51 @@ struct mpgl_osd {
     struct osd_state *osd;
     GL *gl;
     bool use_pbo;
+    bool scaled;
     struct mpgl_osd_part *parts[MAX_OSD_PARTS];
-    const struct gl_format *fmt_table[SUBBITMAP_COUNT];
+    const struct osd_fmt_entry *fmt_table;
     bool formats[SUBBITMAP_COUNT];
     struct gl_vao vao;
     int64_t change_counter;
     // temporary
     int stereo_mode;
-    struct mp_osd_res osd_res;
+    int display_size[2];
     void *scratch;
 };
 
 struct mpgl_osd *mpgl_osd_init(GL *gl, struct mp_log *log, struct osd_state *osd)
 {
+    GLint max_texture_size;
+    gl->GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+
     struct mpgl_osd *ctx = talloc_ptrtype(NULL, ctx);
     *ctx = (struct mpgl_osd) {
         .log = log,
         .osd = osd,
         .gl = gl,
+        .fmt_table = osd_to_gl3_formats,
         .scratch = talloc_zero_size(ctx, 1),
     };
 
-    ctx->fmt_table[SUBBITMAP_LIBASS] = gl_find_unorm_format(gl, 1, 1);
-    ctx->fmt_table[SUBBITMAP_RGBA]   = gl_find_unorm_format(gl, 1, 4);
+    if (gl->es >= 300) {
+        ctx->fmt_table = osd_to_gles3_formats;
+    } else if (!(gl->mpgl_caps & MPGL_CAP_TEX_RG)) {
+        ctx->fmt_table = osd_to_gl2_formats;
+    }
 
-    for (int n = 0; n < MAX_OSD_PARTS; n++)
-        ctx->parts[n] = talloc_zero(ctx, struct mpgl_osd_part);
+    for (int n = 0; n < MAX_OSD_PARTS; n++) {
+        struct mpgl_osd_part *p = talloc_ptrtype(ctx, p);
+        *p = (struct mpgl_osd_part) {
+            .packer = talloc_struct(p, struct bitmap_packer, {
+                .w_max = max_texture_size,
+                .h_max = max_texture_size,
+            }),
+        };
+        ctx->parts[n] = p;
+    }
 
     for (int n = 0; n < SUBBITMAP_COUNT; n++)
-        ctx->formats[n] = !!ctx->fmt_table[n];
+        ctx->formats[n] = ctx->fmt_table[n].type != 0;
 
     gl_vao_init(&ctx->vao, gl, sizeof(struct vertex), vertex_vao);
 
@@ -110,7 +152,8 @@ void mpgl_osd_destroy(struct mpgl_osd *ctx)
     for (int n = 0; n < MAX_OSD_PARTS; n++) {
         struct mpgl_osd_part *p = ctx->parts[n];
         gl->DeleteTextures(1, &p->texture);
-        gl_pbo_upload_uninit(&p->pbo);
+        if (gl->DeleteBuffers)
+            gl->DeleteBuffers(1, &p->buffer);
     }
     talloc_free(ctx);
 }
@@ -120,68 +163,117 @@ void mpgl_osd_set_options(struct mpgl_osd *ctx, bool pbo)
     ctx->use_pbo = pbo;
 }
 
-static int next_pow2(int v)
+static bool upload_pbo(struct mpgl_osd *ctx, struct mpgl_osd_part *osd,
+                       struct sub_bitmaps *imgs)
 {
-    for (int x = 0; x < 30; x++) {
-        if ((1 << x) >= v)
-            return 1 << x;
+    GL *gl = ctx->gl;
+    bool success = true;
+    struct osd_fmt_entry fmt = ctx->fmt_table[imgs->format];
+    int pix_stride = glFmt2bpp(fmt.format, fmt.type);
+
+    if (!osd->buffer) {
+        gl->GenBuffers(1, &osd->buffer);
+        gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, osd->buffer);
+        gl->BufferData(GL_PIXEL_UNPACK_BUFFER, osd->w * osd->h * pix_stride,
+                        NULL, GL_DYNAMIC_COPY);
+        gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     }
-    return INT_MAX;
+
+    gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, osd->buffer);
+    char *data = gl->MapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if (!data) {
+        success = false;
+    } else {
+        struct pos bb[2];
+        packer_get_bb(osd->packer, bb);
+        size_t stride = osd->w * pix_stride;
+        packer_copy_subbitmaps(osd->packer, imgs, data, pix_stride, stride);
+        if (!gl->UnmapBuffer(GL_PIXEL_UNPACK_BUFFER))
+            success = false;
+        glUploadTex(gl, GL_TEXTURE_2D, fmt.format, fmt.type, NULL, stride,
+                    bb[0].x, bb[0].y, bb[1].x - bb[0].x, bb[1].y - bb[0].y, 0);
+    }
+    gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    if (!success) {
+        MP_FATAL(ctx, "Error: can't upload subtitles! "
+                 "Remove the 'pbo' suboption.\n");
+    }
+
+    return success;
+}
+
+static void upload_tex(struct mpgl_osd *ctx, struct mpgl_osd_part *osd,
+                       struct sub_bitmaps *imgs)
+{
+    struct osd_fmt_entry fmt = ctx->fmt_table[imgs->format];
+    if (osd->packer->padding) {
+        struct pos bb[2];
+        packer_get_bb(osd->packer, bb);
+        glClearTex(ctx->gl, GL_TEXTURE_2D, fmt.format, fmt.type,
+                   bb[0].x, bb[0].y, bb[1].x - bb[0].y, bb[1].y - bb[0].y,
+                   0, &ctx->scratch);
+    }
+    for (int n = 0; n < osd->packer->count; n++) {
+        struct sub_bitmap *s = &imgs->parts[n];
+        struct pos p = osd->packer->result[n];
+
+        glUploadTex(ctx->gl, GL_TEXTURE_2D, fmt.format, fmt.type,
+                    s->bitmap, s->stride, p.x, p.y, s->w, s->h, 0);
+    }
 }
 
 static bool upload_osd(struct mpgl_osd *ctx, struct mpgl_osd_part *osd,
                        struct sub_bitmaps *imgs)
 {
     GL *gl = ctx->gl;
-    bool ok = false;
 
-    assert(imgs->packed);
+    // assume 2x2 filter on scaling
+    osd->packer->padding = ctx->scaled || imgs->scaled;
+    int r = packer_pack_from_subbitmaps(osd->packer, imgs);
+    if (r < 0) {
+        MP_ERR(ctx, "OSD bitmaps do not fit on a surface with the maximum "
+               "supported size %dx%d.\n", osd->packer->w_max, osd->packer->h_max);
+        return false;
+    }
 
-    int req_w = next_pow2(imgs->packed_w);
-    int req_h = next_pow2(imgs->packed_h);
-
-    const struct gl_format *fmt = ctx->fmt_table[imgs->format];
-    assert(fmt);
+    struct osd_fmt_entry fmt = ctx->fmt_table[imgs->format];
+    assert(fmt.type != 0);
 
     if (!osd->texture)
         gl->GenTextures(1, &osd->texture);
 
     gl->BindTexture(GL_TEXTURE_2D, osd->texture);
 
-    if (req_w > osd->w || req_h > osd->h || osd->format != imgs->format) {
+    if (osd->packer->w > osd->w || osd->packer->h > osd->h
+        || osd->format != imgs->format)
+    {
         osd->format = imgs->format;
-        osd->w = FFMAX(32, req_w);
-        osd->h = FFMAX(32, req_h);
+        osd->w = FFMAX(32, osd->packer->w);
+        osd->h = FFMAX(32, osd->packer->h);
 
-        MP_VERBOSE(ctx, "Reallocating OSD texture to %dx%d.\n", osd->w, osd->h);
-
-        GLint max_wh;
-        gl->GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_wh);
-
-        if (osd->w > max_wh || osd->h > max_wh) {
-            MP_ERR(ctx, "OSD bitmaps do not fit on a surface with the maximum "
-                   "supported size %dx%d.\n", max_wh, max_wh);
-            goto done;
-        }
-
-        gl->TexImage2D(GL_TEXTURE_2D, 0, fmt->internal_format, osd->w, osd->h,
-                       0, fmt->format, fmt->type, NULL);
+        gl->TexImage2D(GL_TEXTURE_2D, 0, fmt.internal_format, osd->w, osd->h,
+                       0, fmt.format, fmt.type, NULL);
 
         gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        if (gl->DeleteBuffers)
+            gl->DeleteBuffers(1, &osd->buffer);
+        osd->buffer = 0;
     }
 
-    gl_pbo_upload_tex(&osd->pbo, gl, ctx->use_pbo, GL_TEXTURE_2D, fmt->format,
-                      fmt->type, osd->w, osd->h, imgs->packed->planes[0],
-                      imgs->packed->stride[0], 0, 0,
-                      imgs->packed_w, imgs->packed_h);
-    ok = true;
+    bool uploaded = false;
+    if (ctx->use_pbo)
+        uploaded = upload_pbo(ctx, osd, imgs);
+    if (!uploaded)
+        upload_tex(ctx, osd, imgs);
 
-done:
     gl->BindTexture(GL_TEXTURE_2D, 0);
-    return ok;
+
+    return true;
 }
 
 static void gen_osd_cb(void *pctx, struct sub_bitmaps *imgs)
@@ -193,15 +285,14 @@ static void gen_osd_cb(void *pctx, struct sub_bitmaps *imgs)
 
     struct mpgl_osd_part *osd = ctx->parts[imgs->render_index];
 
-    bool ok = true;
     if (imgs->change_id != osd->change_id) {
         if (!upload_osd(ctx, osd, imgs))
-            ok = false;
+            osd->packer->count = 0;
 
         osd->change_id = imgs->change_id;
         ctx->change_counter += 1;
     }
-    osd->num_subparts = ok ? imgs->num_parts : 0;
+    osd->num_subparts = osd->packer->count;
 
     MP_TARRAY_GROW(osd, osd->subparts, osd->num_subparts);
     memcpy(osd->subparts, imgs->parts,
@@ -233,6 +324,7 @@ static int generate_verts(struct mpgl_osd_part *part, struct gl_transform t)
 
     for (int n = 0; n < part->num_subparts; n++) {
         struct sub_bitmap *b = &part->subparts[n];
+        struct pos pos = part->packer->result[n];
         struct vertex *va = part->vertices;
 
         // NOTE: the blend color is used with SUBBITMAP_LIBASS only, so it
@@ -243,7 +335,7 @@ static int generate_verts(struct mpgl_osd_part *part, struct gl_transform t)
 
         write_quad(&va[n * 6], t,
                    b->x, b->y, b->x + b->dw, b->y + b->dh,
-                   b->src_x, b->src_y, b->src_x + b->w, b->src_y + b->h,
+                   pos.x, pos.y, pos.x + b->w, pos.y + b->h,
                    part->w, part->h, color);
     }
 
@@ -295,8 +387,8 @@ void mpgl_osd_draw_part(struct mpgl_osd *ctx, int vp_w, int vp_h, int index)
             struct gl_transform t;
             gl_transform_ortho(&t, 0, vp_w, 0, vp_h);
 
-            float a_x = ctx->osd_res.w * x;
-            float a_y = ctx->osd_res.h * y;
+            float a_x = ctx->display_size[0] * x;
+            float a_y = ctx->display_size[1] * y;
             t.t[0] += a_x * t.m[0][0] + a_y * t.m[1][0];
             t.t[1] += a_x * t.m[0][1] + a_y * t.m[1][1];
 
@@ -316,25 +408,20 @@ struct gl_vao *mpgl_osd_get_vao(struct mpgl_osd *ctx)
     return &ctx->vao;
 }
 
-static void set_res(struct mpgl_osd *ctx, struct mp_osd_res res, int stereo_mode)
-{
-    int div[2];
-    get_3d_side_by_side(stereo_mode, div);
-
-    res.w /= div[0];
-    res.h /= div[1];
-    ctx->osd_res = res;
-}
-
 void mpgl_osd_generate(struct mpgl_osd *ctx, struct mp_osd_res res, double pts,
                        int stereo_mode, int draw_flags)
 {
     for (int n = 0; n < MAX_OSD_PARTS; n++)
         ctx->parts[n]->num_subparts = 0;
 
-    set_res(ctx, res, stereo_mode);
+    int div[2];
+    get_3d_side_by_side(stereo_mode, div);
 
-    osd_draw(ctx->osd, ctx->osd_res, pts, draw_flags, ctx->formats, gen_osd_cb, ctx);
+    struct mp_osd_res s_res = res;
+    ctx->display_size[0] = s_res.w = s_res.w / div[0];
+    ctx->display_size[1] = s_res.h = s_res.h / div[1];
+
+    osd_draw(ctx->osd, s_res, pts, draw_flags, ctx->formats, gen_osd_cb, ctx);
     ctx->stereo_mode = stereo_mode;
 
     // Parts going away does not necessarily result in gen_osd_cb() being called
@@ -345,13 +432,6 @@ void mpgl_osd_generate(struct mpgl_osd *ctx, struct mp_osd_res res, double pts,
             ctx->change_counter += 1;
         part->prev_num_subparts = part->num_subparts;
     }
-}
-
-// See osd_resize() for remarks. This function is an optional optimization too.
-void mpgl_osd_resize(struct mpgl_osd *ctx, struct mp_osd_res res, int stereo_mode)
-{
-    set_res(ctx, res, stereo_mode);
-    osd_resize(ctx->osd, ctx->osd_res);
 }
 
 int64_t mpgl_get_change_counter(struct mpgl_osd *ctx)

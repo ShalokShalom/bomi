@@ -22,6 +22,20 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <va/va.h>
+#include <va/va_x11.h>
+
+#ifndef VA_FOURCC_I420
+#define VA_FOURCC_I420 VA_FOURCC('I', '4', '2', '0')
+#endif
+#ifndef VA_FOURCC_RGBX
+#define VA_FOURCC_RGBX 0x58424752
+#endif
+#ifndef VA_FOURCC_BGRX
+#define VA_FOURCC_BGRX 0x58524742
+#endif
+
+#define VA_STR_FOURCC(fcc) \
+    (const char[]){(fcc), (fcc) >> 8u, (fcc) >> 16u, (fcc) >> 24u, 0}
 
 #include "mp_image.h"
 #include "hwdec.h"
@@ -33,17 +47,16 @@ struct mp_vaapi_ctx {
     struct mp_hwdec_ctx hwctx;
     struct mp_log *log;
     VADisplay display;
-    struct AVBufferRef *av_device_ref; // AVVAAPIDeviceContext*
     struct va_image_formats *image_formats;
-    bool gpu_memcpy_message;
-    // Internal, for va_create_standalone()
-    void *native_ctx;
-    void (*destroy_native_ctx)(void *native_ctx);
+    pthread_mutex_t lock;
 };
 
 bool check_va_status(struct mp_log *log, VAStatus status, const char *msg);
 
 #define CHECK_VA_STATUS(ctx, msg) check_va_status((ctx)->log, status, msg)
+
+#define va_lock(ctx)     pthread_mutex_lock(&(ctx)->lock)
+#define va_unlock(ctx)   pthread_mutex_unlock(&(ctx)->lock)
 
 int                      va_get_colorspace_flag(enum mp_csp csp);
 
@@ -56,8 +69,6 @@ VAImageFormat *          va_image_format_from_imgfmt(struct mp_vaapi_ctx *ctx, i
 bool                     va_image_map(struct mp_vaapi_ctx *ctx, VAImage *image, struct mp_image *mpi);
 bool                     va_image_unmap(struct mp_vaapi_ctx *ctx, VAImage *image);
 
-void va_surface_get_uncropped_size(struct mp_image *mpi, int *out_w, int *out_h);
-
 void va_pool_set_allocator(struct mp_image_pool *pool, struct mp_vaapi_ctx *ctx,
                            int rt_format);
 
@@ -69,10 +80,6 @@ struct mp_image *va_surface_download(struct mp_image *src,
 int va_surface_alloc_imgfmt(struct mp_image *img, int imgfmt);
 int va_surface_upload(struct mp_image *va_dst, struct mp_image *sw_src);
 
-void va_surface_init_subformat(struct mp_image *mpi);
-
 bool va_guess_if_emulated(struct mp_vaapi_ctx *ctx);
-
-struct mp_vaapi_ctx *va_create_standalone(struct mp_log *plog, bool probing);
 
 #endif

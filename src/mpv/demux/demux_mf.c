@@ -24,10 +24,9 @@
 
 #include "osdep/io.h"
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "common/msg.h"
 #include "options/options.h"
-#include "options/m_config.h"
 #include "options/path.h"
 #include "misc/ctype.h"
 
@@ -40,7 +39,7 @@
 
 typedef struct mf {
     struct mp_log *log;
-    struct sh_stream *sh;
+    struct sh_video *sh;
     int curr_frame;
     int nr_of_files;
     char **names;
@@ -109,7 +108,6 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct mp_log *log, char *filenam
 
     char *fname = talloc_size(mf, strlen(filename) + 32);
 
-#if HAVE_GLOB || HAVE_GLOB_WIN32_REPLACEMENT
     if (!strchr(filename, '%')) {
         strcpy(fname, filename);
         if (!strchr(filename, '*'))
@@ -132,7 +130,6 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct mp_log *log, char *filenam
         globfree(&gg);
         goto exit_mf;
     }
-#endif
 
     mp_info(log, "search expr: %s\n", filename);
 
@@ -160,12 +157,15 @@ static mf_t *open_mf_single(void *talloc_ctx, struct mp_log *log, char *filename
     return mf;
 }
 
-static void demux_seek_mf(demuxer_t *demuxer, double seek_pts, int flags)
+static void demux_seek_mf(demuxer_t *demuxer, double rel_seek_secs, int flags)
 {
     mf_t *mf = demuxer->priv;
-    int newpos = seek_pts * mf->sh->codec->fps;
+    int newpos = (flags & SEEK_ABSOLUTE) ? 0 : mf->curr_frame - 1;
+
     if (flags & SEEK_FACTOR)
-        newpos = seek_pts * (mf->nr_of_files - 1);
+        newpos += rel_seek_secs * (mf->nr_of_files - 1);
+    else
+        newpos += rel_seek_secs * mf->sh->fps;
     if (newpos < 0)
         newpos = 0;
     if (newpos >= mf->nr_of_files)
@@ -199,9 +199,9 @@ static int demux_mf_fill_buffer(demuxer_t *demuxer)
             demux_packet_t *dp = new_demux_packet(data.len);
             if (dp) {
                 memcpy(dp->buffer, data.start, data.len);
-                dp->pts = mf->curr_frame / mf->sh->codec->fps;
+                dp->pts = mf->curr_frame / mf->sh->fps;
                 dp->keyframe = true;
-                demux_add_packet(mf->sh, dp);
+                demux_add_packet(demuxer->streams[0], dp);
             }
         }
         talloc_free(data.start);
@@ -291,13 +291,13 @@ static const char *probe_format(mf_t *mf, char *type, enum demux_check check)
 
 static int demux_open_mf(demuxer_t *demuxer, enum demux_check check)
 {
+    sh_video_t *sh_video = NULL;
     mf_t *mf;
 
     if (strncmp(demuxer->stream->url, "mf://", 5) == 0 &&
-        demuxer->stream->info && strcmp(demuxer->stream->info->name, "mf") == 0)
-    {
+        demuxer->stream->type == STREAMTYPE_MF)
         mf = open_mf_pattern(demuxer, demuxer->log, demuxer->stream->url + 5);
-    } else {
+    else {
         mf = open_mf_single(demuxer, demuxer->log, demuxer->stream->url);
         int bog = 0;
         MP_TARRAY_APPEND(mf, mf->streams, bog, demuxer->stream);
@@ -306,33 +306,25 @@ static int demux_open_mf(demuxer_t *demuxer, enum demux_check check)
     if (!mf || mf->nr_of_files < 1)
         goto error;
 
-    double mf_fps;
-    char *mf_type;
-    mp_read_option_raw(demuxer->global, "mf-fps", &m_option_type_double, &mf_fps);
-    mp_read_option_raw(demuxer->global, "mf-type", &m_option_type_string, &mf_type);
-
+    char *force_type = demuxer->opts->mf_type;
     const char *codec = mp_map_mimetype_to_video_codec(demuxer->stream->mime_type);
-    if (!codec || (mf_type && mf_type[0]))
-        codec = probe_format(mf, mf_type, check);
-    talloc_free(mf_type);
+    if (!codec || (force_type && force_type[0]))
+        codec = probe_format(mf, force_type, check);
     if (!codec)
         goto error;
 
     mf->curr_frame = 0;
 
     // create a new video stream header
-    struct sh_stream *sh = demux_alloc_sh_stream(STREAM_VIDEO);
-    struct mp_codec_params *c = sh->codec;
+    struct sh_stream *sh = new_sh_stream(demuxer, STREAM_VIDEO);
+    sh_video = sh->video;
 
-    c->codec = codec;
-    c->disp_w = 0;
-    c->disp_h = 0;
-    c->fps = mf_fps;
-    c->reliable_fps = true;
+    sh->codec = codec;
+    sh_video->disp_w = 0;
+    sh_video->disp_h = 0;
+    sh_video->fps = demuxer->opts->mf_fps;
 
-    demux_add_sh_stream(demuxer, sh);
-
-    mf->sh = sh;
+    mf->sh = sh_video;
     demuxer->priv = (void *)mf;
     demuxer->seekable = true;
 
@@ -352,7 +344,7 @@ static int demux_control_mf(demuxer_t *demuxer, int cmd, void *arg)
 
     switch (cmd) {
     case DEMUXER_CTRL_GET_TIME_LENGTH:
-        *((double *)arg) = (double)mf->nr_of_files / mf->sh->codec->fps;
+        *((double *)arg) = (double)mf->nr_of_files / mf->sh->fps;
         return DEMUXER_CTRL_OK;
 
     default:

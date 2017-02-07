@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -20,7 +20,6 @@
 #include <limits.h>
 
 #include "common/common.h"
-#include "common/msg.h"
 #include "chmap_sel.h"
 
 static const struct mp_chmap speaker_replacements[][2] = {
@@ -93,6 +92,17 @@ void mp_chmap_sel_add_any(struct mp_chmap_sel *s)
 void mp_chmap_sel_add_waveext(struct mp_chmap_sel *s)
 {
     s->allow_waveext = true;
+}
+
+// Classic ALSA-based MPlayer layouts.
+void mp_chmap_sel_add_alsa_def(struct mp_chmap_sel *s)
+{
+    for (int n = 1; n <= MP_NUM_CHANNELS; n++) {
+        struct mp_chmap t;
+        mp_chmap_from_channels_alsa(&t, n);
+        if (t.num)
+            mp_chmap_sel_add_map(s, &t);
+    }
 }
 
 // Add a channel map that should be allowed.
@@ -274,24 +284,18 @@ static bool mp_chmap_is_better(struct mp_chmap *req, struct mp_chmap *old,
     if (new_lost_r != old_lost_r)
         return new_lost_r < old_lost_r;
 
+    int old_lost = mp_chmap_diffn(req, old);
+    int new_lost = mp_chmap_diffn(req, new);
+
+    // If the situation is equal with replaced speakers, but one of them loses
+    // less if no replacements are performed, pick the better one, even if it
+    // means an upmix. This prefers exact supersets over inexact equivalents.
+    if (new_lost != old_lost)
+        return new_lost < old_lost;
+
     struct mp_chmap old_p = *old, new_p = *new;
     mp_chmap_remove_na(&old_p);
     mp_chmap_remove_na(&new_p);
-
-    // If the situation is equal with replaced speakers, but the replacement is
-    // perfect for only one of them, let the better one win. This prefers
-    // inexact equivalents over exact supersets.
-    bool perfect_r_new = !new_lost_r && new_p.num <= old_p.num;
-    bool perfect_r_old = !old_lost_r && old_p.num <= new_p.num;
-    if (perfect_r_new != perfect_r_old)
-        return perfect_r_new;
-
-    int old_lost = mp_chmap_diffn(req, old);
-    int new_lost = mp_chmap_diffn(req, new);
-    // If the situation is equal with replaced speakers, pick the better one,
-    // even if it means an upmix.
-    if (new_lost != old_lost)
-        return new_lost < old_lost;
 
     // Some kind of upmix. If it's perfect, prefer the smaller one. Even if not,
     // both have equal loss, so also prefer the smaller one.
@@ -352,38 +356,4 @@ bool mp_chmap_sel_get_def(const struct mp_chmap_sel *s, struct mp_chmap *map,
         }
     }
     return map->num > 0;
-}
-
-// Print the set of allowed channel layouts.
-void mp_chmal_sel_log(const struct mp_chmap_sel *s, struct mp_log *log, int lev)
-{
-    if (!mp_msg_test(log, lev))
-        return;
-
-    for (int i = 0; i < s->num_chmaps; i++)
-        mp_msg(log, lev, " - %s\n", mp_chmap_to_str(&s->chmaps[i]));
-    for (int i = 0; i < MP_SPEAKER_ID_COUNT; i++) {
-        if (!s->speakers[i])
-            continue;
-        struct mp_chmap l = {.num = 1, .speaker = { i }};
-        mp_msg(log, lev, " - #%s\n",
-                    i == MP_SPEAKER_ID_FC ? "fc" : mp_chmap_to_str_hr(&l));
-    }
-    if (s->allow_waveext)
-        mp_msg(log, lev, " - waveext\n");
-    if (s->allow_any)
-        mp_msg(log, lev, " - anything\n");
-}
-
-// Select a channel map from the given list that fits best to c. Don't change
-// *c if there's no match, or the list is empty.
-void mp_chmap_sel_list(struct mp_chmap *c, struct mp_chmap *maps, int num_maps)
-{
-    // This is a separate function to keep messing with mp_chmap_sel internals
-    // within this source file.
-    struct mp_chmap_sel sel = {
-        .chmaps = maps,
-        .num_chmaps = num_maps,
-    };
-    mp_chmap_sel_fallback(&sel, c);
 }

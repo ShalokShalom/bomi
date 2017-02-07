@@ -87,14 +87,11 @@ int ai_oss_init(audio_in_t *ai)
     int err;
     int ioctl_param;
 
-    const char *device = ai->oss.device;
-    if (!device)
-        device = "/dev/dsp";
-
-    ai->oss.audio_fd = open(device, O_RDONLY | O_CLOEXEC);
+    ai->oss.audio_fd = open(ai->oss.device, O_RDONLY | O_CLOEXEC);
     if (ai->oss.audio_fd < 0)
     {
-        MP_ERR(ai, "Unable to open '%s': %s\n", device, mp_strerror(errno));
+        MP_ERR(ai, "Unable to open '%s': %s\n",
+               ai->oss.device, mp_strerror(errno));
         return -1;
     }
 

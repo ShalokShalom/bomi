@@ -32,9 +32,6 @@ static int cmp_filename(const void *a, const void *b)
 
 static int open_file(struct demuxer *demuxer, enum demux_check check)
 {
-    if (!demuxer->access_references)
-        return -1;
-
     int flags = 0;
     int probe_size = STREAM_BUFFER_SIZE;
     if (check <= DEMUX_CHECK_REQUEST) {
@@ -68,10 +65,23 @@ static int open_file(struct demuxer *demuxer, enum demux_check check)
     char **files = NULL;
     int num_files = 0;
 
-    while (mp_archive_next_entry(mpa)) {
+    for (;;) {
+        struct archive_entry *entry;
+        int r = archive_read_next_header(mpa->arch, &entry);
+        if (r == ARCHIVE_EOF)
+            break;
+        if (r < ARCHIVE_OK)
+            MP_ERR(demuxer, "libarchive: %s\n", archive_error_string(mpa->arch));
+        if (r < ARCHIVE_WARN)
+            break;
+        if (archive_entry_filetype(entry) != AE_IFREG)
+            continue;
+        const char *fn = archive_entry_pathname(entry);
+        // Some archives may have no filenames.
+        if (!fn)
+            fn = talloc_asprintf(mpa, "mpv_unknown#%d\n", num_files);
         // stream_libarchive.c does the real work
-        char *f = talloc_asprintf(mpa, "archive://%s|%s", prefix,
-                                  mpa->entry_filename);
+        char *f = talloc_asprintf(mpa, "archive://%s|%s", prefix, fn);
         MP_TARRAY_APPEND(mpa, files, num_files, f);
     }
 

@@ -63,14 +63,18 @@ Available filters are:
         (If you just want to set defaults for this filter that will be used
         even by automatically inserted lavrresample instances, you should
         prefer setting them with ``--af-defaults=lavrresample:...``.)
-    ``normalize=<yes|no|auto>``
-        Whether to normalize when remixing channel layouts (default: auto).
-        ``auto`` uses the value set by ``--audio-normalize-downmix``.
+    ``normalize=<yes|no>``
+        Whether to normalize when remixing channel layouts (default: yes). This
+        is e.g. applied when downmixing surround audio to stereo. The advantage
+        is that this guarantees that no clipping can happen. Unfortunately,
+        this can also lead to too low volume levels. Whether you enable or
+        disable this is essentially a matter of taste, but the default uses
+        the safer choice.
     ``o=<string>``
         Set AVOptions on the SwrContext or AVAudioResampleContext. These should
         be documented by FFmpeg or Libav.
 
-``lavcac3enc[=options]``
+``lavcac3enc[=tospdif[:bitrate[:minch]]]``
     Encode multi-channel audio to AC-3 at runtime using libavcodec. Supports
     16-bit native-endian input format, maximum 6 channels. The output is
     big-endian when outputting a raw AC-3 stream, native-endian when
@@ -102,10 +106,6 @@ Available filters are:
     ``minch=<n>``
         If the input channel number is less than ``<minch>``, the filter will
         detach itself (default: 3).
-
-    ``encoder=<name>``
-        Select the libavcodec encoder used. Currently, this should be an AC-3
-        encoder, and using another codec will fail horribly.
 
 ``equalizer=g1:g2:g3:...:g10``
     10 octave band graphic equalizer, implemented using 10 IIR band-pass
@@ -164,7 +164,7 @@ Available filters are:
 
     .. admonition:: Examples
 
-        ``mpv --af=channels=4:[0-1,1-0,2-2,3-3] media.avi``
+        ``mpv --af=channels=4:[0-1,1-0,0-2,1-3] media.avi``
             Would change the number of channels to 4 and set up 4 routes that
             swap channel 0 and channel 1 and leave channel 2 and 3 intact.
             Observe that if media containing two channels were played back,
@@ -312,12 +312,33 @@ Available filters are:
         ``mpv '--af=format=channels=5.1' '--audio-channels=5.1'`` would always force
         remixing audio to 5.1 and output it like this.
 
-    This filter supports the following ``af-command`` commands:
+``delay[=[ch1,ch2,...]]``
+    Delays the sound to the loudspeakers such that the sound from the
+    different channels arrives at the listening position simultaneously. It is
+    only useful if you have more than 2 loudspeakers.
 
-    ``set-matrix``
-        Set the ``<matrix>`` argument dynamically. This can be used to change
-        the mixing matrix at runtime, without reinitializing the entire filter
-        chain.
+    ``[ch1,ch2,...]``
+        The delay in ms that should be imposed on each channel (floating point
+        number between 0 and 1000).
+
+    To calculate the required delay for the different channels, do as follows:
+
+    1. Measure the distance to the loudspeakers in meters in relation to your
+       listening position, giving you the distances s1 to s5 (for a 5.1
+       system). There is no point in compensating for the subwoofer (you will
+       not hear the difference anyway).
+
+    2. Subtract the distances s1 to s5 from the maximum distance, i.e.
+       ``s[i] = max(s) - s[i]; i = 1...5``.
+
+    3. Calculate the required delays in ms as ``d[i] = 1000*s[i]/342; i =
+       1...5``.
+
+    .. admonition:: Example
+
+        ``mpv --af=delay=[10.5,10.5,0,0,7,0] media.avi``
+            Would delay front left and right by 10.5 ms, the two rear channels
+            and the subwoofer by 0 ms and the center channel by 7 ms.
 
 ``drc[=method:target]``
     Applies dynamic range compression. This maximizes the volume by compressing
@@ -401,6 +422,10 @@ Available filters are:
         ``mpv --af=scaletempo=stride=30:overlap=.50:search=10 media.ogg``
             Would tweak the quality and performance parameters.
 
+        ``mpv --af=format=float,scaletempo media.ogg``
+            Would make scaletempo use float code. Maybe faster on some
+            platforms.
+
         ``mpv --af=scaletempo=scale=1.2:speed=pitch audio.ogg``
             Would play media at 1.2x normal speed, with audio at normal pitch.
             Changing playback speed would change pitch, leaving audio tempo at
@@ -409,13 +434,9 @@ Available filters are:
 ``rubberband``
     High quality pitch correction with librubberband. This can be used in place
     of ``scaletempo``, and will be used to adjust audio pitch when playing
-    at speed different from normal. It can also be used to adjust audio pitch
-    without changing playback speed.
+    at speed different from normal.
 
-    ``<pitch-scale>``
-        Sets the pitch scaling factor. Frequencies are multiplied by this value.
-
-    This filter has a number of additional sub-options. You can list them with
+    This filter has a number of sub-options. You can list them with
     ``mpv --af=rubberband=help``. This will also show the default values
     for each option. The options are not documented here, because they are
     merely passed to librubberband. Look at the librubberband documentation
@@ -423,13 +444,6 @@ Available filters are:
     http://breakfastquay.com/rubberband/code-doc/classRubberBand_1_1RubberBandStretcher.html
     (The mapping of the mpv rubberband filter sub-option names and values to
     those of librubberband follows a simple pattern: ``"Option" + Name + Value``.)
-
-    This filter supports the following ``af-command`` commands:
-
-    ``set-pitch``
-        Set the ``<pitch-scale>`` argument dynamically. This can be used to
-        change the playback pitch at runtime. Note that speed is controlled
-        using the standard ``speed`` property, not ``af-command``.
 
 ``lavfi=graph``
     Filter audio using FFmpeg's libavfilter.

@@ -273,6 +273,7 @@ static struct mp_cmd *parse_cmd_str(struct mp_log *log, void *tmp,
             break;
         if (pctx_read_token(ctx, &cur_token) < 0)
             goto error;
+        break;
     }
 
     if (!find_cmd(ctx->log, cmd, cur_token))
@@ -416,7 +417,6 @@ mp_cmd_t *mp_cmd_clone(mp_cmd_t *cmd)
         m_option_copy(ret->args[i].type, &ret->args[i].v, &cmd->args[i].v);
     }
     ret->original = bstrdup(ret, cmd->original);
-    ret->key_name = talloc_strdup(ret, ret->key_name);
 
     if (cmd->id == MP_CMD_COMMAND_LIST) {
         struct mp_cmd *prev = NULL;

@@ -60,14 +60,14 @@
 struct priv {
     int fd;
     bool close;
-    bool use_poll;
+    bool regular;
 };
 
 static int fill_buffer(stream_t *s, char *buffer, int max_len)
 {
     struct priv *p = s->priv;
 #ifndef __MINGW32__
-    if (p->use_poll) {
+    if (!p->regular) {
         int c = s->cancel ? mp_cancel_get_fd(s->cancel) : -1;
         struct pollfd fds[2] = {
             {.fd = p->fd, .events = POLLIN},
@@ -234,7 +234,7 @@ static int open_f(stream_t *stream)
         .fd = -1
     };
     stream->priv = p;
-    stream->is_local_file = true;
+    stream->type = STREAMTYPE_FILE;
 
     bool write = stream->mode == STREAM_WRITE;
     int m = O_CLOEXEC | (write ? O_RDWR | O_CREAT | O_TRUNC : O_RDONLY);
@@ -262,6 +262,9 @@ static int open_f(stream_t *stream)
             MP_INFO(stream, "Writing to stdout...\n");
             p->fd = 1;
         }
+#ifdef __MINGW32__
+        setmode(p->fd, O_BINARY);
+#endif
         p->close = false;
     } else {
         mode_t openmode = S_IRUSR | S_IWUSR;
@@ -269,7 +272,6 @@ static int open_f(stream_t *stream)
         openmode |= S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
         if (!write)
             m |= O_NONBLOCK;
-        p->use_poll = true;
 #endif
         p->fd = open(filename, m | O_BINARY, openmode);
         if (p->fd < 0) {
@@ -280,14 +282,13 @@ static int open_f(stream_t *stream)
         struct stat st;
         if (fstat(p->fd, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
-                p->use_poll = false;
-                stream->is_directory = true;
+                stream->type = STREAMTYPE_DIR;
                 stream->allow_caching = false;
                 MP_INFO(stream, "This is a directory - adding to playlist.\n");
             }
 #ifndef __MINGW32__
             if (S_ISREG(st.st_mode)) {
-                p->use_poll = false;
+                p->regular = true;
                 // O_NONBLOCK has weird semantics on file locks; remove it.
                 int val = fcntl(p->fd, F_GETFL) & ~(unsigned)O_NONBLOCK;
                 fcntl(p->fd, F_SETFL, val);
@@ -296,10 +297,6 @@ static int open_f(stream_t *stream)
         }
         p->close = true;
     }
-
-#ifdef __MINGW32__
-    setmode(p->fd, O_BINARY);
-#endif
 
     off_t len = lseek(p->fd, 0, SEEK_END);
     lseek(p->fd, 0, SEEK_SET);

@@ -320,9 +320,7 @@ const struct ao_driver audio_out_sndio = {
     .reset     = reset,
     .priv_size = sizeof(struct priv),
     .options = (const struct m_option[]) {
-        OPT_STRING("device", dev, 0, OPTDEF_STR(SIO_DEVANY),
-                   DEVICE_OPT_DEPRECATION),
+        OPT_STRING("device", dev, 0, OPTDEF_STR(SIO_DEVANY)),
         {0}
     },
-    .options_prefix = "ao-sndio",
 };

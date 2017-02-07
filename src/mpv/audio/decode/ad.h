@@ -35,11 +35,7 @@ struct ad_functions {
     int (*init)(struct dec_audio *da, const char *decoder);
     void (*uninit)(struct dec_audio *da);
     int (*control)(struct dec_audio *da, int cmd, void *arg);
-    // Return whether or not the packet has been consumed.
-    bool (*send_packet)(struct dec_audio *da, struct demux_packet *pkt);
-    // Return whether decoding is still going on (false if EOF was reached).
-    // Never returns false & *out set, but can return true with !*out.
-    bool (*receive_frame)(struct dec_audio *da, struct mp_audio **out);
+    int (*decode_packet)(struct dec_audio *da, struct mp_audio **out);
 };
 
 enum ad_ctrl {

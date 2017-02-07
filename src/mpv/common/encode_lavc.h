@@ -46,14 +46,8 @@ struct encode_lavc_context {
 
     float vo_fps;
 
-    // FFmpeg contexts.
-    AVFormatContext *avc;
-    AVStream *vst;
-    AVStream *ast;
-    AVCodecContext *vcc;
-    AVCodecContext *acc;
-
     // these are processed from the options
+    AVFormatContext *avc;
     AVRational timebase;
     AVCodec *vc;
     AVCodec *ac;
@@ -94,31 +88,26 @@ struct encode_lavc_context {
 };
 
 // interface for vo/ao drivers
-int encode_lavc_alloc_stream(struct encode_lavc_context *ctx,
-                             enum AVMediaType mt, AVStream **stream_out,
-                             AVCodecContext **codec_out);
-void encode_lavc_write_stats(struct encode_lavc_context *ctx,
-                             AVCodecContext *stream);
-int encode_lavc_write_frame(struct encode_lavc_context *ctx, AVStream *stream,
-                            AVPacket *packet);
+AVStream *encode_lavc_alloc_stream(struct encode_lavc_context *ctx, enum AVMediaType mt);
+void encode_lavc_write_stats(struct encode_lavc_context *ctx, AVStream *stream);
+int encode_lavc_write_frame(struct encode_lavc_context *ctx, AVPacket *packet);
 int encode_lavc_supports_pixfmt(struct encode_lavc_context *ctx, enum AVPixelFormat format);
-int encode_lavc_open_codec(struct encode_lavc_context *ctx,
-                           AVCodecContext *codec);
+AVCodec *encode_lavc_get_codec(struct encode_lavc_context *ctx, AVStream *stream);
+int encode_lavc_open_codec(struct encode_lavc_context *ctx, AVStream *stream);
 int encode_lavc_available(struct encode_lavc_context *ctx);
 int encode_lavc_timesyncfailed(struct encode_lavc_context *ctx);
 int encode_lavc_start(struct encode_lavc_context *ctx); // returns 1 on success
 int encode_lavc_oformat_flags(struct encode_lavc_context *ctx);
-double encode_lavc_getoffset(struct encode_lavc_context *ctx,
-                             AVCodecContext *codec);
+double encode_lavc_getoffset(struct encode_lavc_context *ctx, AVStream *stream);
 void encode_lavc_fail(struct encode_lavc_context *ctx, const char *format, ...); // report failure of encoding
 
 bool encode_lavc_set_csp(struct encode_lavc_context *ctx,
-                         AVCodecContext *codec, enum mp_csp csp);
+                         AVStream *stream, enum mp_csp csp);
 bool encode_lavc_set_csp_levels(struct encode_lavc_context *ctx,
-                                AVCodecContext *codec, enum mp_csp_levels lev);
+                                AVStream *stream, enum mp_csp_levels lev);
 enum mp_csp encode_lavc_get_csp(struct encode_lavc_context *ctx,
-                                AVCodecContext *codec);
+                                AVStream *stream);
 enum mp_csp_levels encode_lavc_get_csp_levels(struct encode_lavc_context *ctx,
-                                              AVCodecContext *codec);
+                                              AVStream *stream);
 
 #endif

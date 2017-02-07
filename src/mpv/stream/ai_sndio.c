@@ -38,10 +38,7 @@ int ai_sndio_init(audio_in_t *ai)
 {
     int err;
 
-    const char *device = ai->sndio.device;
-    if (!device)
-        device = "default";
-    if ((ai->sndio.hdl = sio_open(device, SIO_REC, 0)) == NULL) {
+    if ((ai->sndio.hdl = sio_open(ai->sndio.device, SIO_REC, 0)) == NULL) {
         MP_ERR(ai, "could not open sndio audio");
         return -1;
     }

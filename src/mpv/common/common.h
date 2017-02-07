@@ -18,20 +18,21 @@
 #ifndef MPLAYER_MPCOMMON_H
 #define MPLAYER_MPCOMMON_H
 
-#include <assert.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osdep/compiler.h"
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 // double should be able to represent this exactly
 #define MP_NOPTS_VALUE (-0x1p+63)
 
 #define MP_CONCAT_(a, b) a ## b
 #define MP_CONCAT(a, b) MP_CONCAT_(a, b)
+
+#define ROUND(x) ((int)((x) < 0 ? (x) - 0.5 : (x) + 0.5))
 
 #define MPMAX(a, b) ((a) > (b) ? (a) : (b))
 #define MPMIN(a, b) ((a) > (b) ? (b) : (a))
@@ -58,15 +59,8 @@ enum stream_type {
     STREAM_TYPE_COUNT,
 };
 
-enum {
-    DATA_OK     = 1,
-    DATA_WAIT   = 0,
-    DATA_AGAIN  = -1,
-    DATA_EOF    = -2,
-};
-
-extern const char mpv_version[];
-extern const char mpv_builddate[];
+extern const char *const mpv_version;
+extern const char *const mpv_builddate;
 
 char *mp_format_time(double time, bool fractions);
 char *mp_format_time_fmt(const char *fmt, double time);
@@ -97,8 +91,5 @@ bool mp_append_escaped_string(void *talloc_ctx, struct bstr *dst,
 
 char *mp_strerror_buf(char *buf, size_t buf_size, int errnum);
 #define mp_strerror(e) mp_strerror_buf((char[80]){0}, 80, e)
-
-char *mp_tag_str_buf(char *buf, size_t buf_size, uint32_t tag);
-#define mp_tag_str(t) mp_tag_str_buf((char[22]){0}, 22, t)
 
 #endif /* MPLAYER_MPCOMMON_H */

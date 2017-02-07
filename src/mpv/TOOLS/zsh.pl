@@ -4,13 +4,10 @@
 
 use strict;
 use warnings;
-use warnings FATAL => 'uninitialized';
 
 my $mpv = $ARGV[0] || 'mpv';
 
 my @opts = parse_main_opts('--list-options', '^ (\-\-[^\s\*]*)\*?\s*(.*)');
-
-die "Couldn't find any options" unless (@opts);
 
 my @ao = parse_opts('--ao=help', '^  ([^\s\:]*)\s*: (.*)');
 my @vo = parse_opts('--vo=help', '^  ([^\s\:]*)\s*: (.*)');
@@ -39,8 +36,7 @@ chomp $vf_str;
 
 $protos_str = join(' ', @protos);
 
-my $runtime_completions = <<'EOS';
-  profile|show-profile)
+my $profile_comp = <<'EOS';
     local -a profiles
     local current
     for current in "${(@f)$($words[1] --profile=help)}"; do
@@ -67,39 +63,16 @@ my $runtime_completions = <<'EOS';
       profiles=($profiles 'help[list profiles]')
       _values -s , 'profile(s)' $profiles && rc=0
     fi
-  ;;
-
-  audio-device)
-    local -a audio_devices
-    local current
-    for current in "${(@f)$($words[1] --audio-device=help)}"; do
-      current=${current//\*/\\\*}
-      current=${current//\:/\\\:}
-      current=${current//\[/\\\[}
-      current=${current//\]/\\\]}
-      if [[ $current =~ '  '\'([^\']*)\'' \('(.*)'\)' ]]; then
-        audio_devices=($audio_devices "$match[1][$match[2]]")
-      fi
-    done
-    audio_devices=($audio_devices 'help[list audio devices]')
-    _values 'audio device' $audio_devices && rc=0
-  ;;
 EOS
-chomp $runtime_completions;
+chomp $profile_comp;
 
 my $tmpl = <<"EOS";
 #compdef mpv
 
-# For customization, see:
-#  https://github.com/mpv-player/mpv/wiki/Zsh-completion-customization
+# mpv zsh completion
 
 local curcontext="\$curcontext" state state_descr line
 typeset -A opt_args
-
-# By default, don't complete URLs unless no files match
-local -a tag_order
-zstyle -a ":completion:*:*:\$service:*" tag-order tag_order || \
-  zstyle  ":completion:*:*:\$service:*" tag-order '!urls'
 
 local rc=1
 
@@ -132,7 +105,9 @@ $vf_str
     && rc=0
   ;;
 
-$runtime_completions
+  profile|show-profile)
+$profile_comp
+  ;;
 
   files)
     compset -P '*,'
@@ -144,7 +119,8 @@ $runtime_completions
     local expl
     _tags files urls
     while _tags; do
-      _requested files expl 'media file' _files && rc=0
+      _requested files expl 'media file' _files -g \\
+        "*.(#i)(asf|asx|avi|flac|flv|m1v|m2p|m2v|m4v|mjpg|mka|mkv|mov|mp3|mp4|mpe|mpeg|mpg|ogg|ogm|ogv|qt|rm|ts|vob|wav|webm|wma|wmv)(-.)" && rc=0
       if _requested urls; then
         while _next_label urls expl URL; do
           _urls "\$expl[@]" && rc=0
@@ -207,7 +183,7 @@ sub parse_main_opts {
                 }
             } elsif ($line =~ /\[file\]/) {
                 $entry .= '->files';
-            } elsif ($name =~ /^--(ao|vo|af|vf|profile|show-profile|audio-device)$/) {
+            } elsif ($name =~ /^--(ao|vo|af|vf|profile|show-profile)$/) {
                 $entry .= "->$1";
             }
             push @list, $entry;

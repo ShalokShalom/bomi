@@ -1003,15 +1003,10 @@ static int uninit(priv_t *priv)
     set_mute(priv, 1);
 
     /* free memory and close device */
-    free(priv->map);
-    priv->map = NULL;
+    free(priv->map);                priv->map = NULL;
     priv->mapcount = 0;
-    if (priv->video_fd != -1) {
-        v4l2_close(priv->video_fd);
-        priv->video_fd = -1;
-    }
-    free(priv->video_dev);
-    priv->video_dev = NULL;
+    if(priv->video_fd!=-1)v4l2_close(priv->video_fd);        priv->video_fd  = -1;
+    free(priv->video_dev);        priv->video_dev = NULL;
 
     if (priv->video_ringbuffer) {
         for (int n = 0; n < priv->video_buffer_size_current; n++) {
@@ -1357,7 +1352,7 @@ static int start(priv_t *priv)
         if (priv->map[i].buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC)
             MP_WARN(priv, "compiled without clock_gettime() that is needed to handle monotone video timestamps from the kernel. Expect desync.\n");
 #endif
-        /* count up to make sure this is correct every time */
+        /* count up to make sure this is correct everytime */
         priv->mapcount++;
 
         if (v4l2_ioctl(priv->video_fd, VIDIOC_QBUF, &(priv->map[i].buf)) < 0) {

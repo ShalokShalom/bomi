@@ -275,7 +275,7 @@ static void enable_kx(bool enable)
     // shouldn't be relied on here either.
     if (isatty(STDOUT_FILENO)) {
         char *cmd = enable ? "\033=" : "\033>";
-        (void)write(STDOUT_FILENO, cmd, strlen(cmd));
+        write(STDOUT_FILENO, cmd, strlen(cmd));
     }
 }
 
@@ -378,7 +378,7 @@ static void quit_request_sighandler(int signum)
 {
     do_deactivate_getch2();
 
-    (void)write(death_pipe[1], &(char){1}, 1);
+    write(death_pipe[1], &(char){0}, 1);
 }
 
 static void *terminal_thread(void *ptr)
@@ -397,21 +397,19 @@ static void *terminal_thread(void *ptr)
         if (fds[1].revents)
             stdin_ok = getch2(input_ctx);
     }
-    char c;
-    bool quit = read(death_pipe[0], &c, 1) == 1 && c == 1;
     // Important if we received SIGTERM, rather than regular quit.
-    if (quit) {
-        struct mp_cmd *cmd = mp_input_parse_cmd(input_ctx, bstr0("quit 4"), "");
-        if (cmd)
-            mp_input_queue_cmd(input_ctx, cmd);
-    }
+    struct mp_cmd *cmd = mp_input_parse_cmd(input_ctx, bstr0("quit 4"), "");
+    if (cmd)
+        mp_input_queue_cmd(input_ctx, cmd);
     return NULL;
 }
 
 void terminal_setup_getch(struct input_ctx *ictx)
 {
-    if (!getch2_enabled || input_ctx)
+    if (!getch2_enabled)
         return;
+
+    assert(!input_ctx); // already setup
 
     if (mp_make_wakeup_pipe(death_pipe) < 0)
         return;
@@ -452,7 +450,7 @@ void terminal_uninit(void)
     do_deactivate_getch2();
 
     if (input_ctx) {
-        (void)write(death_pipe[1], &(char){0}, 1);
+        write(death_pipe[1], &(char){0}, 1);
         pthread_join(input_thread, NULL);
         close(death_pipe[0]);
         close(death_pipe[1]);

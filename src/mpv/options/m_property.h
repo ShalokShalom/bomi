@@ -48,12 +48,6 @@ enum mp_property_action {
     //  arg: char**
     M_PROPERTY_PRINT,
 
-    // Like M_PROPERTY_GET_TYPE, but get a type that is compatible to the real
-    // type, but reflect practical limits, such as runtime-available values.
-    // This is mostly used for "UI" related things.
-    // (Example: volume property.)
-    M_PROPERTY_GET_CONSTRICTED_TYPE,
-
     // Switch the property up/down by a given value.
     // If unimplemented, the property wrapper uses the property type as
     // fallback.
@@ -134,9 +128,6 @@ struct m_property {
     void *priv;
 };
 
-struct m_property *m_property_list_find(const struct m_property *list,
-                                        const char *name);
-
 // Access a property.
 // action: one of m_property_action
 // ctx: opaque value passed through to property implementation
@@ -193,8 +184,6 @@ struct m_sub_property {
 // Convenience macros which can be used as part of a sub_property entry.
 #define SUB_PROP_INT(i) \
     .type = {.type = CONF_TYPE_INT}, .value = {.int_ = (i)}
-#define SUB_PROP_INT64(i) \
-    .type = {.type = CONF_TYPE_INT64}, .value = {.int64 = (i)}
 #define SUB_PROP_STR(s) \
     .type = {.type = CONF_TYPE_STRING}, .value = {.string = (char *)(s)}
 #define SUB_PROP_FLOAT(f) \

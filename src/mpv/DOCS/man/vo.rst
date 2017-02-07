@@ -4,20 +4,29 @@ VIDEO OUTPUT DRIVERS
 Video output drivers are interfaces to different video output facilities. The
 syntax is:
 
-``--vo=<driver1,driver2,...[,]>``
+``--vo=<driver1[:suboption1[=value]:...],driver2,...[,]>``
     Specify a priority list of video output drivers to be used.
 
-If the list has a trailing ``,``, mpv will fall back on drivers not contained
-in the list.
+If the list has a trailing ',', mpv will fall back on drivers not contained
+in the list. Suboptions are optional and can mostly be omitted.
+
+You can also set defaults for each driver. The defaults are applied before the
+normal driver parameters.
+
+``--vo-defaults=<driver1[:parameter1:parameter2:...],driver2,...>``
+    Set defaults for each driver.
 
 .. note::
 
     See ``--vo=help`` for a list of compiled-in video output drivers.
 
-    The recommended output driver is ``--vo=opengl``, which is the default. All
-    other drivers are for compatibility or special purposes. If the default
-    does not work, it will fallback to other drivers (in the same order as
-    listed by ``--vo=help``).
+    The recommended output drivers are ``--vo=vdpau`` and ``--vo=opengl-hq``.
+    All other drivers are just for compatibility or special purposes.
+
+.. admonition:: Example
+
+    ``--vo=opengl,xv,``
+        Try the ``opengl`` driver, then the ``xv`` driver, then others.
 
 Available video output drivers are:
 
@@ -28,13 +37,11 @@ Available video output drivers are:
 
     .. note:: This driver is for compatibility with old systems.
 
-    The following global options are supported by this video output:
-
-    ``--xv-adaptor=<number>``
+    ``adaptor=<number>``
         Select a specific XVideo adapter (check xvinfo results).
-    ``--xv-port=<number>``
+    ``port=<number>``
         Select a specific XVideo port.
-    ``--xv-ck=<cur|use|set>``
+    ``ck=<cur|use|set>``
         Select the source from which the color key is taken (default: cur).
 
         cur
@@ -45,11 +52,9 @@ Available video output drivers are:
         set
           Same as use but also sets the supplied color key.
 
-    ``--xv-ck-method=<none|man|bg|auto>``
+    ``ck-method=<man|bg|auto>``
         Sets the color key drawing method (default: man).
 
-        none
-          Disables color-keying.
         man
           Draw the color key manually (reduces flicker in some cases).
         bg
@@ -57,21 +62,18 @@ Available video output drivers are:
         auto
           Let Xv draw the color key.
 
-    ``--xv-colorkey=<number>``
+    ``colorkey=<number>``
         Changes the color key to an RGB value of your choice. ``0x000000`` is
         black and ``0xffffff`` is white.
 
-    ``--xv-buffers=<number>``
+    ``no-colorkey``
+        Disables color-keying.
+
+    ``buffers=<number>``
         Number of image buffers to use for the internal ringbuffer (default: 2).
         Increasing this will use more memory, but might help with the X server
         not responding quickly enough if video FPS is close to or higher than
         the display refresh rate.
-
-``x11`` (X11 only)
-    Shared memory video output driver without hardware acceleration that works
-    whenever X11 is present.
-
-    .. note:: This is a fallback only, and should not be normally used.
 
 ``vdpau`` (X11 only)
     Uses the VDPAU interface to display and optionally also decode video.
@@ -84,25 +86,23 @@ Available video output drivers are:
         ``chroma-deint``, ``pullup``, ``hqscaling``. These sub-options are
         deprecated, and you should use the ``vdpaupp`` video filter instead.
 
-    The following global options are supported by this video output:
-
-    ``--vo-vdpau-sharpen=<-1-1>``
+    ``sharpen=<-1-1>``
         (Deprecated. See note about ``vdpaupp``.)
 
         For positive values, apply a sharpening algorithm to the video, for
         negative values a blurring algorithm (default: 0).
-    ``--vo-vdpau-denoise=<0-1>``
+    ``denoise=<0-1>``
         (Deprecated. See note about ``vdpaupp``.)
 
         Apply a noise reduction algorithm to the video (default: 0; no noise
         reduction).
-    ``--vo-vdpau-deint=<-4-4>``
+    ``deint=<-4-4>``
         (Deprecated. See note about ``vdpaupp``.)
 
         Select deinterlacing mode (default: 0). In older versions (as well as
         MPlayer/mplayer2) you could use this option to enable deinterlacing.
         This doesn't work anymore, and deinterlacing is enabled with either
-        the ``d`` key (by default mapped to the command ``cycle deinterlace``),
+        the ``D`` key (by default mapped to the command ``cycle deinterlace``),
         or the ``--deinterlace`` option. Also, to select the default deint mode,
         you should use something like ``--vf-defaults=vdpaupp:deint-mode=temporal``
         instead of this sub-option.
@@ -119,32 +119,32 @@ Available video output drivers are:
         4
             Motion-adaptive temporal deinterlacing with edge-guided spatial
             interpolation. Needs fast video hardware.
-    ``--vo-vdpau-chroma-deint``
+    ``chroma-deint``
         (Deprecated. See note about ``vdpaupp``.)
 
         Makes temporal deinterlacers operate both on luma and chroma (default).
         Use no-chroma-deint to solely use luma and speed up advanced
         deinterlacing. Useful with slow video memory.
-    ``--vo-vdpau-pullup``
+    ``pullup``
         (Deprecated. See note about ``vdpaupp``.)
 
         Try to apply inverse telecine, needs motion adaptive temporal
         deinterlacing.
-    ``--vo-vdpau-hqscaling=<0-9>``
+    ``hqscaling=<0-9>``
         (Deprecated. See note about ``vdpaupp``.)
 
         0
             Use default VDPAU scaling (default).
         1-9
             Apply high quality VDPAU scaling (needs capable hardware).
-    ``--vo-vdpau-fps=<number>``
+    ``fps=<number>``
         Override autodetected display refresh rate value (the value is needed
         for framedrop to allow video playback rates higher than display
         refresh rate, and for vsync-aware frame timing adjustments). Default 0
         means use autodetected value. A positive value is interpreted as a
         refresh rate in Hz and overrides the autodetected value. A negative
         value disables all timing adjustment and framedrop logic.
-    ``--vo-vdpau-composite-detect``
+    ``composite-detect``
         NVIDIA's current VDPAU implementation behaves somewhat differently
         under a compositing window manager and does not give accurate frame
         timing information. With this option enabled, the player tries to
@@ -154,21 +154,21 @@ Available video output drivers are:
         means timing is somewhat less accurate than without compositing, but
         with the composited mode behavior of the NVIDIA driver, there is no
         hard playback speed limit even without the disabled logic. Enabled by
-        default, use ``--vo-vdpau-composite-detect=no`` to disable.
-    ``--vo-vdpau-queuetime-windowed=<number>`` and ``queuetime-fs=<number>``
+        default, use ``no-composite-detect`` to disable.
+    ``queuetime_windowed=<number>`` and ``queuetime_fs=<number>``
         Use VDPAU's presentation queue functionality to queue future video
         frame changes at most this many milliseconds in advance (default: 50).
         See below for additional information.
-    ``--vo-vdpau-output-surfaces=<2-15>``
+    ``output_surfaces=<2-15>``
         Allocate this many output surfaces to display video frames (default:
         3). See below for additional information.
-    ``--vo-vdpau-colorkey=<#RRGGBB|#AARRGGBB>``
+    ``colorkey=<#RRGGBB|#AARRGGBB>``
         Set the VDPAU presentation queue background color, which in practice
         is the colorkey used if VDPAU operates in overlay mode (default:
         ``#020507``, some shade of black). If the alpha component of this value
         is 0, the default VDPAU colorkey will be used instead (which is usually
         green).
-    ``--vo-vdpau-force-yuv``
+    ``force-yuv``
         Never accept RGBA input. This means mpv will insert a filter to convert
         to a YUV format before the VO. Sometimes useful to force availability
         of certain YUV-only features, like video equalizer or deinterlacing.
@@ -195,40 +195,31 @@ Available video output drivers are:
     driver implementation may also have limits on the length of maximum
     queuing time or number of queued surfaces that work well or at all.
 
-``direct3d`` (Windows only)
+``direct3d_shaders`` (Windows only)
     Video output driver that uses the Direct3D interface.
 
     .. note:: This driver is for compatibility with systems that don't provide
-              proper OpenGL drivers, and where ANGLE does not perform well.
+              proper OpenGL drivers.
 
-    .. note:: Before to 0.21.0, ``direct3d_shaders`` and ``direct3d`` were
-              different, with ``direct3d`` not using shader by default. Now
-              both use shaders by default, and ``direct3d_shaders`` is a
-              deprecated alias. Use the ``--vo-direct3d-prefer-stretchrect``
-              or the ``--vo-direct3d-disable-shaders`` options to get the old
-              behavior of ``direct3d``.
-
-    The following global options are supported by this video output:
-
-    ``--vo-direct3d-prefer-stretchrect``
+    ``prefer-stretchrect``
         Use ``IDirect3DDevice9::StretchRect`` over other methods if possible.
 
-    ``--vo-direct3d-disable-stretchrect``
+    ``disable-stretchrect``
         Never render the video using ``IDirect3DDevice9::StretchRect``.
 
-    ``--vo-direct3d-disable-textures``
+    ``disable-textures``
         Never render the video using D3D texture rendering. Rendering with
         textures + shader will still be allowed. Add ``disable-shaders`` to
         completely disable video rendering with textures.
 
-    ``--vo-direct3d-disable-shaders``
+    ``disable-shaders``
         Never use shaders when rendering video.
 
-    ``--vo-direct3d-only-8bit``
+    ``only-8bit``
         Never render YUV video with more than 8 bits per component.
         Using this flag will force software conversion to 8-bit.
 
-    ``--vo-direct3d-disable-texture-align``
+    ``disable-texture-align``
         Normally texture sizes are always aligned to 16. With this option
         enabled, the video texture will always have exactly the same size as
         the video itself.
@@ -238,11 +229,11 @@ Available video output drivers are:
     might crash, might cause slow downs, etc. Contact the developers if you
     actually need any of these for performance or proper operation.
 
-    ``--vo-direct3d-force-power-of-2``
+    ``force-power-of-2``
         Always force textures to power of 2, even if the device reports
         non-power-of-2 texture sizes as supported.
 
-    ``--vo-direct3d-texture-memory=<mode>``
+    ``texture-memory=<mode>``
         Only affects operation with shaders/texturing enabled, and (E)OSD.
         Possible values:
 
@@ -266,24 +257,26 @@ Available video output drivers are:
             Use ``D3DPOOL_SCRATCH``, with a ``D3DPOOL_SYSTEMMEM`` texture for
             locking.
 
-    ``--vo-direct3d-swap-discard``
+    ``swap-discard``
         Use ``D3DSWAPEFFECT_DISCARD``, which might be faster.
         Might be slower too, as it must(?) clear every frame.
 
-    ``--vo-direct3d-exact-backbuffer``
+    ``exact-backbuffer``
         Always resize the backbuffer to window size.
+
+``direct3d`` (Windows only)
+    Same as ``direct3d_shaders``, but with the options ``disable-textures``
+    and ``disable-shaders`` forced.
+
+    .. note:: This driver is for compatibility with old systems.
 
 ``opengl``
     OpenGL video output driver. It supports extended scaling methods, dithering
     and color management.
 
-    See `OpenGL renderer options`_ for options specific to this VO.
-
-    By default, it tries to use fast and fail-safe settings. Use the
-    ``opengl-hq`` profile to use this driver with defaults set to high
-    quality rendering. (This profile is also the replacement for
-    ``--vo=opengl-hq``.) The profile can be applied with ``--profile=opengl-hq``
-    and its contents can be viewed with ``--show-profile=opengl-hq``.
+    By default, it tries to use fast and fail-safe settings. Use the alias
+    ``opengl-hq`` to use this driver with defaults set to high quality
+    rendering.
 
     Requires at least OpenGL 2.1.
 
@@ -298,12 +291,578 @@ Available video output drivers are:
     the hardware decoder APIs.
 
     ``opengl`` makes use of FBOs by default. Sometimes you can achieve better
-    quality or performance by changing the ``--opengl-fbo-format`` option to
+    quality or performance by changing the ``fbo-format`` suboption to
     ``rgb16f``, ``rgb32f`` or ``rgb``. Known problems include Mesa/Intel not
     accepting ``rgb16``, Mesa sometimes not being compiled with float texture
     support, and some OS X setups being very slow with ``rgb16`` but fast
-    with ``rgb32f``. If you have problems, you can also try enabling the
-    ``--opengl-dumb-mode=yes`` option.
+    with ``rgb32f``. If you have problems, you can also try passing the
+    ``dumb-mode=yes`` sub-option.
+
+    ``dumb-mode=<yes|no>``
+        This mode is extremely restricted, and will disable most extended
+        OpenGL features. This includes high quality scalers and custom
+        shaders!
+
+        It is intended for hardware that does not support FBOs (including GLES,
+        which supports it insufficiently), or to get some more performance out
+        of bad or old hardware.
+
+        This mode is forced automatically if needed, and this option is mostly
+        useful for debugging.
+
+    ``scale=<filter>``
+
+        ``bilinear``
+            Bilinear hardware texture filtering (fastest, very low quality).
+            This is the default for compatibility reasons.
+
+        ``spline36``
+            Mid quality and speed. This is the default when using ``opengl-hq``.
+
+        ``lanczos``
+            Lanczos scaling. Provides mid quality and speed. Generally worse
+            than ``spline36``, but it results in a slightly sharper image
+            which is good for some content types. The number of taps can be
+            controlled with ``scale-radius``, but is best left unchanged.
+
+            This filter corresponds to the old ``lanczos3`` alias if the default
+            radius is used, while ``lanczos2`` corresponds to a radius of 2.
+
+            (This filter is an alias for ``sinc``-windowed ``sinc``)
+
+        ``ewa_lanczos``
+            Elliptic weighted average Lanczos scaling. Also known as Jinc.
+            Relatively slow, but very good quality. The radius can be
+            controlled with ``scale-radius``. Increasing the radius makes the
+            filter sharper but adds more ringing.
+
+            (This filter is an alias for ``jinc``-windowed ``jinc``)
+
+        ``ewa_lanczossharp``
+            A slightly sharpened version of ewa_lanczos, preconfigured to use
+            an ideal radius and parameter. If your hardware can run it, this is
+            probably what you should use by default.
+
+        ``mitchell``
+            Mitchell-Netravali. The ``B`` and ``C`` parameters can be set with
+            ``scale-param1`` and ``scale-param2``. This filter is very good at
+            downscaling (see ``dscale``).
+
+        ``oversample``
+            A version of nearest neighbour that (naively) oversamples pixels,
+            so that pixels overlapping edges get linearly interpolated instead
+            of rounded. This essentially removes the small imperfections and
+            judder artifacts caused by nearest-neighbour interpolation, in
+            exchange for adding some blur. This filter is good at temporal
+            interpolation, and also known as "smoothmotion" (see ``tscale``).
+
+        ``custom``
+            A user-defined custom shader (see ``scale-shader``).
+
+        There are some more filters, but most are not as useful. For a complete
+        list, pass ``help`` as value, e.g.::
+
+            mpv --vo=opengl:scale=help
+
+    ``scale-param1=<value>``, ``scale-param2=<value>``
+        Set filter parameters. Ignored if the filter is not tunable.
+        Currently, this affects the following filter parameters:
+
+        bcspline
+            Spline parameters (``B`` and ``C``). Defaults to 0.5 for both.
+
+        gaussian
+            Scale parameter (``t``). Increasing this makes the result blurrier.
+            Defaults to 1.
+
+        sharpen3, sharpen5
+            Sharpening strength. Increasing this makes the image sharper but
+            adds more ringing and aliasing. Defaults to 0.5.
+
+        oversample
+            Minimum distance to an edge before interpolation is used. Setting
+            this to 0 will always interpolate edges, whereas setting it to 0.5
+            will never interpolate, thus behaving as if the regular nearest
+            neighbour algorithm was used. Defaults to 0.0.
+
+    ``scale-blur=<value>``
+        Kernel scaling factor (also known as a blur factor). Decreasing this
+        makes the result sharper, increasing it makes it blurrier (default 0).
+        If set to 0, the kernel's preferred blur factor is used. Note that
+        setting this too low (eg. 0.5) leads to bad results. It's generally
+        recommended to stick to values between 0.8 and 1.2.
+
+    ``scale-radius=<value>``
+        Set radius for filters listed below, must be a float number between 0.5
+        and 16.0. Defaults to the filter's preferred radius if not specified.
+
+            ``sinc`` and derivatives, ``jinc`` and derivatives, ``gaussian``, ``box`` and ``triangle``
+
+        Note that depending on filter implementation details and video scaling
+        ratio, the radius that actually being used might be different
+        (most likely being increased a bit).
+
+    ``scale-antiring=<value>``
+        Set the antiringing strength. This tries to eliminate ringing, but can
+        introduce other artifacts in the process. Must be a float number
+        between 0.0 and 1.0. The default value of 0.0 disables antiringing
+        entirely.
+
+        Note that this doesn't affect the special filters ``bilinear``,
+        ``bicubic_fast`` or ``sharpen``.
+
+    ``scale-window=<window>``
+        (Advanced users only) Choose a custom windowing function for the kernel.
+        Defaults to the filter's preferred window if unset. Use
+        ``scale-window=help`` to get a list of supported windowing functions.
+
+    ``scale-wparam=<window>``
+        (Advanced users only) Configure the parameter for the window function
+        given by ``scale-window``. Ignored if the window is not tunable.
+        Currently, this affects the following window parameters:
+
+        kaiser
+            Window parameter (alpha). Defaults to 6.33.
+        blackman
+            Window parameter (alpha). Defaults to 0.16.
+        gaussian
+            Scale parameter (t). Increasing this makes the window wider.
+            Defaults to 1.
+
+    ``scaler-resizes-only``
+        Disable the scaler if the video image is not resized. In that case,
+        ``bilinear`` is used instead whatever is set with ``scale``. Bilinear
+        will reproduce the source image perfectly if no scaling is performed.
+        Note that this option never affects ``cscale``.
+
+    ``pbo``
+        Enable use of PBOs. This is slightly faster, but can sometimes lead to
+        sporadic and temporary image corruption (in theory, because reupload
+        is not retried when it fails), and perhaps actually triggers slower
+        paths with drivers that don't support PBOs properly.
+
+    ``dither-depth=<N|no|auto>``
+        Set dither target depth to N. Default: no.
+
+        no
+            Disable any dithering done by mpv.
+        auto
+            Automatic selection. If output bit depth cannot be detected,
+            8 bits per component are assumed.
+        8
+            Dither to 8 bit output.
+
+        Note that the depth of the connected video display device can not be
+        detected. Often, LCD panels will do dithering on their own, which
+        conflicts with ``opengl``'s dithering and leads to ugly output.
+
+    ``dither-size-fruit=<2-8>``
+        Set the size of the dither matrix (default: 6). The actual size of
+        the matrix is ``(2^N) x (2^N)`` for an option value of ``N``, so a
+        value of 6 gives a size of 64x64. The matrix is generated at startup
+        time, and a large matrix can take rather long to compute (seconds).
+
+        Used in ``dither=fruit`` mode only.
+
+    ``dither=<fruit|ordered|no>``
+        Select dithering algorithm (default: fruit). (Normally, the
+        ``dither-depth`` option controls whether dithering is enabled.)
+
+    ``temporal-dither``
+        Enable temporal dithering. (Only active if dithering is enabled in
+        general.) This changes between 8 different dithering pattern on each
+        frame by changing the orientation of the tiled dithering matrix.
+        Unfortunately, this can lead to flicker on LCD displays, since these
+        have a high reaction time.
+
+    ``temporal-dither-period=<1-128>``
+        Determines how often the dithering pattern is updated when
+        ``temporal-dither`` is in use. 1 (the default) will update on every
+        video frame, 2 on every other frame, etc.
+
+    ``debug``
+        Check for OpenGL errors, i.e. call ``glGetError()``. Also request a
+        debug OpenGL context (which does nothing with current graphics drivers
+        as of this writing).
+
+    ``interpolation``
+        Reduce stuttering caused by mismatches in the video fps and display
+        refresh rate (also known as judder).
+
+        This essentially attempts to interpolate the missing frames by
+        convoluting the video along the temporal axis. The filter used can be
+        controlled using the ``tscale`` setting.
+
+        Note that this relies on vsync to work, see ``swapinterval`` for more
+        information.
+
+    ``swapinterval=<n>``
+        Interval in displayed frames between two buffer swaps.
+        1 is equivalent to enable VSYNC, 0 to disable VSYNC. Defaults to 1 if
+        not specified.
+
+        Note that this depends on proper OpenGL vsync support. On some platforms
+        and drivers, this only works reliably when in fullscreen mode. It may
+        also require driver-specific hacks if using multiple monitors, to
+        ensure mpv syncs to the right one. Compositing window managers can
+        also lead to bad results, as can missing or incorrect display FPS
+        information (see ``--display-fps``).
+
+    ``dscale=<filter>``
+        Like ``scale``, but apply these filters on downscaling instead. If this
+        option is unset, the filter implied by ``scale`` will be applied.
+
+    ``cscale=<filter>``
+        As ``scale``, but for interpolating chroma information. If the image
+        is not subsampled, this option is ignored entirely.
+
+    ``tscale=<filter>``
+        The filter used for interpolating the temporal axis (frames). This is
+        only used if ``interpolation`` is enabled. The only valid choices
+        for ``tscale`` are separable convolution filters (use ``tscale=help``
+        to get a list). The default is ``oversample``.
+
+        Note that the maximum supported filter radius is currently 3, due to
+        limitations in the number of video textures that can be loaded
+        simultaneously.
+
+    ``tscale-clamp``
+        Clamp the ``tscale`` filter kernel's value range to [0-1]. This reduces
+        excessive ringing artifacts in the temporal domain (which typically
+        manifest themselves as short flashes or fringes of black, mostly
+        around moving edges) in exchange for potentially adding more blur.
+
+    ``dscale-radius``, ``cscale-radius``, ``tscale-radius``, etc.
+        Set filter parameters for ``dscale``, ``cscale`` and ``tscale``,
+        respectively.
+
+        See the corresponding options for ``scale``.
+
+    ``linear-scaling``
+        Scale in linear light. It should only be used with a ``fbo-format``
+        that has at least 16 bit precision.
+
+    ``fancy-downscaling``
+        When using convolution based filters, extend the filter size
+        when downscaling. Trades quality for reduced downscaling performance.
+
+        This is automatically disabled for anamorphic video, because this
+        feature doesn't work correctly with different scale factors in
+        different directions.
+
+    ``pre-shaders=<files>``, ``post-shaders=<files>``, ``scale-shader=<file>``
+        Custom GLSL fragment shaders.
+
+        pre-shaders (list)
+            These get applied after conversion to RGB and before linearization
+            and upscaling. Operates on non-linear RGB (same as input). This is
+            the best place to put things like sharpen filters.
+        scale-shader
+            This gets used instead of scale/cscale when those options are set
+            to ``custom``. The colorspace it operates on depends on the values
+            of ``linear-scaling`` and ``sigmoid-upscaling``, so no assumptions
+            should be made here.
+        post-shaders (list)
+            These get applied after upscaling and subtitle blending (when
+            ``blend-subtitles`` is enabled), but before color management.
+            Operates on linear RGB if ``linear-scaling`` is in effect,
+            otherwise non-linear RGB. This is the best place for colorspace
+            transformations (eg. saturation mapping).
+
+        These files must define a function with the following signature::
+
+            vec4 sample(sampler2D tex, vec2 pos, vec2 tex_size)
+
+        The meanings of the parameters are as follows:
+
+        sampler2D tex
+            The source texture for the shader.
+        vec2 pos
+            The position to be sampled, in coordinate space [0-1].
+        vec2 tex_size
+            The size of the texture, in pixels. This may differ from image_size,
+            eg. for subsampled content or for post-shaders.
+
+        In addition to these parameters, the following uniforms are also
+        globally available:
+
+        float random
+            A random number in the range [0-1], different per frame.
+        int frame
+            A simple count of frames rendered, increases by one per frame and
+            never resets (regardless of seeks).
+        vec2 image_size
+            The size in pixels of the input image.
+
+        For example, a shader that inverts the colors could look like this::
+
+            vec4 sample(sampler2D tex, vec2 pos, vec2 tex_size)
+            {
+                vec4 color = texture(tex, pos);
+                return vec4(1.0 - color.rgb, color.a);
+            }
+
+    ``deband``
+        Enable the debanding algorithm. This greatly reduces the amount of
+        visible banding, blocking and other quantization artifacts, at the
+        expensive of very slightly blurring some of the finest details. In
+        practice, it's virtually always an improvement - the only reason to
+        disable it would be for performance.
+
+    ``deband-iterations=<1..16>``
+        The number of debanding steps to perform per sample. Each step reduces
+        a bit more banding, but takes time to compute. Note that the strength
+        of each step falls off very quickly, so high numbers are practically
+        useless. (Default 4)
+
+        If the performance hit of debanding is too great, you can reduce this
+        to 2 or 1 with marginal visual quality loss.
+
+    ``deband-threshold=<0..4096>``
+        The debanding filter's cut-off threshold. Higher numbers increase the
+        debanding strength dramatically but progressively diminish image
+        details. (Default 64)
+
+    ``deband-range=<1..64>``
+        The debanding filter's initial radius. The radius increases linearly
+        for each iteration. A higher radius will find more gradients, but
+        a lower radius will smooth more aggressively. (Default 8)
+
+    ``deband-grain=<0..4096>``
+        Add some extra noise to the image. This significantly helps cover up
+        remaining quantization artifacts. Higher numbers add more noise.
+        (Default 48)
+
+    ``sigmoid-upscaling``
+        When upscaling, use a sigmoidal color transform to avoid emphasizing
+        ringing artifacts. This also implies ``linear-scaling``.
+
+    ``sigmoid-center``
+        The center of the sigmoid curve used for ``sigmoid-upscaling``, must
+        be a float between 0.0 and 1.0. Defaults to 0.75 if not specified.
+
+    ``sigmoid-slope``
+        The slope of the sigmoid curve used for ``sigmoid-upscaling``, must
+        be a float between 1.0 and 20.0. Defaults to 6.5 if not specified.
+
+    ``glfinish``
+        Call ``glFinish()`` before and after swapping buffers (default: disabled).
+        Slower, but might help getting better results when doing framedropping.
+        Can completely ruin performance. The details depend entirely on the
+        OpenGL driver.
+
+    ``waitvsync``
+        Call ``glXWaitVideoSyncSGI`` after each buffer swap (default: disabled).
+        This may or may not help with video timing accuracy and frame drop. It's
+        possible that this makes video output slower, or has no effect at all.
+
+        X11/GLX only.
+
+    ``dwmflush=<no|windowed|yes>``
+        Calls ``DwmFlush`` after swapping buffers on Windows (default: no).
+        It also sets ``SwapInterval(0)`` to ignore the OpenGL timing. Values
+        are: no (disabled), windowed (only in windowed mode), yes (also in
+        full screen).
+        This may help getting more consistent frame intervals, especially with
+        high-fps clips - which might also reduce dropped frames. Typically a
+        value of ``windowed`` should be enough since full screen may bypass the
+        DWM.
+
+        Windows only.
+
+    ``sw``
+        Continue even if a software renderer is detected.
+
+    ``backend=<sys>``
+        The value ``auto`` (the default) selects the windowing backend. You
+        can also pass ``help`` to get a complete list of compiled in backends
+        (sorted by autoprobe order).
+
+        auto
+            auto-select (default)
+        cocoa
+            Cocoa/OS X
+        win
+            Win32/WGL
+        x11
+            X11/GLX
+        wayland
+            Wayland/EGL
+        x11egl
+            X11/EGL
+
+    ``es``
+        Force or prefer GLES2/3 over desktop OpenGL, if supported.
+
+    ``fbo-format=<fmt>``
+        Selects the internal format of textures used for FBOs. The format can
+        influence performance and quality of the video output.
+        ``fmt`` can be one of: rgb, rgba, rgb8, rgb10, rgb10_a2, rgb16, rgb16f,
+        rgb32f, rgba12, rgba16, rgba16f, rgba32f.
+        Default: rgba16.
+
+    ``gamma=<0.1..2.0>``
+        Set a gamma value (default: 1.0). If gamma is adjusted in other ways
+        (like with the ``--gamma`` option or key bindings and the ``gamma``
+        property), the value is multiplied with the other gamma value.
+
+        Recommended values based on the environmental brightness:
+
+        1.0
+            Brightly illuminated (default)
+        0.9
+            Slightly dim
+        0.8
+            Pitch black room
+
+    ``gamma-auto``
+        Automatically corrects the gamma value depending on ambient lighting
+        conditions (adding a gamma boost for dark rooms).
+
+        With ambient illuminance of 64lux, mpv will pick the 1.0 gamma value
+        (no boost), and slightly increase the boost up until 0.8 for 16lux.
+
+        NOTE: Only implemented on OS X.
+
+    ``target-prim=<value>``
+        Specifies the primaries of the display. Video colors will be adapted
+        to this colorspace if necessary. Valid values are:
+
+        auto
+            Disable any adaptation (default)
+        bt.470m
+            ITU-R BT.470 M
+        bt.601-525
+            ITU-R BT.601 (525-line SD systems, eg. NTSC), SMPTE 170M/240M
+        bt.601-625
+            ITU-R BT.601 (625-line SD systems, eg. PAL/SECAM), ITU-R BT.470 B/G
+        bt.709
+            ITU-R BT.709 (HD), IEC 61966-2-4 (sRGB), SMPTE RP177 Annex B
+        bt.2020
+            ITU-R BT.2020 (UHD)
+        apple
+            Apple RGB
+        adobe
+            Adobe RGB (1998)
+        prophoto
+            ProPhoto RGB (ROMM)
+        cie1931
+            CIE 1931 RGB (not to be confused with CIE XYZ)
+
+    ``target-trc=<value>``
+        Specifies the transfer characteristics (gamma) of the display. Video
+        colors will be adjusted to this curve. Valid values are:
+
+        auto
+            Disable any adaptation (default)
+        bt.1886
+            ITU-R BT.1886 curve, without the brightness drop (approx. 1.961)
+        srgb
+            IEC 61966-2-4 (sRGB)
+        linear
+            Linear light output
+        gamma1.8
+            Pure power curve (gamma 1.8), also used for Apple RGB
+        gamma2.2
+            Pure power curve (gamma 2.2)
+        gamma2.8
+            Pure power curve (gamma 2.8), also used for BT.470-BG
+        prophoto
+            ProPhoto RGB (ROMM)
+
+    ``icc-profile=<file>``
+        Load an ICC profile and use it to transform linear RGB to screen output.
+        Needs LittleCMS 2 support compiled in. This option overrides the
+        ``target-prim``, ``target-trc`` and ``icc-profile-auto`` options.
+
+    ``icc-profile-auto``
+        Automatically select the ICC display profile currently specified by
+        the display settings of the operating system.
+
+        NOTE: Only implemented on OS X and X11
+
+    ``icc-cache-dir=<dirname>``
+        Store and load the 3D LUTs created from the ICC profile in this directory.
+        This can be used to speed up loading, since LittleCMS 2 can take a while
+        to create a 3D LUT. Note that these files contain uncompressed LUTs.
+        Their size depends on the ``3dlut-size``, and can be very big.
+
+        NOTE: This is not cleaned automatically, so old, unused cache files
+        may stick around indefinitely.
+
+    ``icc-intent=<value>``
+        Specifies the ICC intent used for the color transformation (when using
+        ``icc-profile``).
+
+        0
+            perceptual
+        1
+            relative colorimetric (default)
+        2
+            saturation
+        3
+            absolute colorimetric
+
+    ``3dlut-size=<r>x<g>x<b>``
+        Size of the 3D LUT generated from the ICC profile in each dimension.
+        Default is 128x256x64.
+        Sizes must be a power of two, and 512 at most.
+
+    ``blend-subtitles=<yes|video|no>``
+        Blend subtitles directly onto upscaled video frames, before
+        interpolation and/or color management (default: no). Enabling this
+        causes subtitles to be affected by ``icc-profile``, ``target-prim``,
+        ``target-trc``, ``interpolation``, ``gamma`` and ``post-shader``. It
+        also increases subtitle performance when using ``interpolation``.
+
+        The downside of enabling this is that it restricts subtitles to the
+        visible portion of the video, so you can't have subtitles exist in the
+        black margins below a video (for example).
+
+        If ``video`` is selected, the behavior is similar to ``yes``, but subs
+        are drawn at the video's native resolution, and scaled along with the
+        video.
+
+        .. warning:: This changes the way subtitle colors are handled. Normally,
+                     subtitle colors are assumed to be in sRGB and color managed
+                     as such. Enabling this makes them treated as being in the
+                     video's color space instead. This is good if you want
+                     things like softsubbed ASS signs to match the video colors,
+                     but may cause SRT subtitles or similar to look slightly off.
+
+    ``alpha=<blend|yes|no>``
+        Decides what to do if the input has an alpha component (default: blend).
+
+        blend
+            Blend the frame against a black background.
+        yes
+            Try to create a framebuffer with alpha component. This only makes sense
+            if the video contains alpha information (which is extremely rare). May
+            not be supported on all platforms. If alpha framebuffers are
+            unavailable, it silently falls back on a normal framebuffer. Note
+            that if you set the ``fbo-format`` option to a non-default value,
+            a format with alpha must be specified, or this won't work.
+        no
+            Ignore alpha component.
+
+    ``rectangle-textures``
+        Force use of rectangle textures (default: no). Normally this shouldn't
+        have any advantages over normal textures. Note that hardware decoding
+        overrides this flag.
+
+    ``background=<color>``
+        Color used to draw parts of the mpv window not covered by video.
+        See ``--osd-color`` option how colors are defined.
+
+``opengl-hq``
+    Same as ``opengl``, but with default settings for high quality rendering.
+
+    This is equivalent to::
+
+        --vo=opengl:scale=spline36:cscale=spline36:dscale=mitchell:dither-depth=auto:fancy-downscaling:sigmoid-upscaling:pbo:deband
+
+    Note that some cheaper LCDs do dithering that gravely interferes with
+    ``opengl``'s dithering. Disabling dithering with ``dither-depth=no`` helps.
 
 ``sdl``
     SDL 2.0+ Render video output driver, depending on system with or without
@@ -313,12 +872,10 @@ Available video output drivers are:
     .. note:: This driver is for compatibility with systems that don't provide
               proper graphics drivers, or which support GLES only.
 
-    The following global options are supported by this video output:
-
-    ``--sdl-sw``
+    ``sw``
         Continue even if a software renderer is detected.
 
-    ``--sdl-switch-mode``
+    ``switch-mode``
         Instruct SDL to switch the monitor video mode when going fullscreen.
 
 ``vaapi``
@@ -330,9 +887,7 @@ Available video output drivers are:
     .. note:: This driver is for compatibility with crappy systems. You can
               use vaapi hardware decoding with ``--vo=opengl`` too.
 
-    The following global options are supported by this video output:
-
-    ``--vo-vaapi-scaling=<algorithm>``
+    ``scaling=<algorithm>``
         default
             Driver default (mpv default as well).
         fast
@@ -342,9 +897,9 @@ Available video output drivers are:
         nla
             ``non-linear anamorphic scaling``
 
-    ``--vo-vaapi-deint-mode=<mode>``
+    ``deint-mode=<mode>``
         Select deinterlacing algorithm. Note that by default deinterlacing is
-        initially always off, and needs to be enabled with the ``d`` key
+        initially always off, and needs to be enabled with the ``D`` key
         (default key binding for ``cycle deinterlace``).
 
         This option doesn't apply if libva supports video post processing (vpp).
@@ -361,7 +916,7 @@ Available video output drivers are:
         bob
             bob deinterlacing (default for older libva).
 
-    ``--vo-vaapi-scaled-osd=<yes|no>``
+    ``scaled-osd=<yes|no>``
         If enabled, then the OSD is rendered at video resolution and scaled to
         display resolution. By default, this is disabled, and the OSD is
         rendered at display resolution if the driver supports it.
@@ -371,9 +926,7 @@ Available video output drivers are:
 
     Usually, it's better to disable video with ``--no-video`` instead.
 
-    The following global options are supported by this video output:
-
-    ``--vo-null-fps=<value>``
+    ``fps=<value>``
         Simulate display FPS. This artificially limits how many frames the
         VO accepts per second.
 
@@ -382,35 +935,11 @@ Available video output drivers are:
 
     .. note:: This driver is a joke.
 
-``tct``
-    Color Unicode art video output driver that works on a text console.
-    Depends on support of true color by modern terminals to display the images
-    at full color range. On Windows it requires an ansi terminal such as mintty.
-
-    ``--vo-tct-algo=<algo>``
-        Select how to write the pixels to the terminal.
-
-        half-blocks
-            Uses unicode LOWER HALF BLOCK character to achieve higher vertical
-            resolution. (Default.)
-        plain
-            Uses spaces. Causes vertical resolution to drop twofolds, but in
-            theory works in more places.
-
-    ``--vo-tct-width=<width>``  ``--vo-tct-height=<height>``
-        Assume the terminal has the specified character width and/or height.
-        These default to 80x25 if the terminal size cannot be determined.
-
-    ``--vo-tct-256=<yes|no>`` (default: no)
-        Use 256 colors - for terminals which don't support true color.
-
 ``image``
     Output each frame into an image file in the current directory. Each file
     takes the frame number padded with leading zeros as name.
 
-    The following global options are supported by this video output:
-
-    ``--vo-image-format=<format>``
+    ``format=<format>``
         Select the image file format.
 
         jpg
@@ -428,24 +957,24 @@ Available video output drivers are:
         tga
             Truevision TGA.
 
-    ``--vo-image-png-compression=<0-9>``
+    ``png-compression=<0-9>``
         PNG compression factor (speed vs. file size tradeoff) (default: 7)
-    ``--vo-image-png-filter=<0-5>``
+    ``png-filter=<0-5>``
         Filter applied prior to PNG compression (0 = none; 1 = sub; 2 = up;
         3 = average; 4 = Paeth; 5 = mixed) (default: 5)
-    ``--vo-image-jpeg-quality=<0-100>``
+    ``jpeg-quality=<0-100>``
         JPEG quality factor (default: 90)
-    ``--vo-image-jpeg-progressive=<yes|no>``
+    ``(no-)jpeg-progressive``
         Specify standard or progressive JPEG (default: no).
-    ``--vo-image-jpeg-baseline=<yes|no>``
+    ``(no-)jpeg-baseline``
         Specify use of JPEG baseline or not (default: yes).
-    ``--vo-image-jpeg-optimize=<0-100>``
+    ``jpeg-optimize=<0-100>``
         JPEG optimization factor (default: 100)
-    ``--vo-image-jpeg-smooth=<0-100>``
+    ``jpeg-smooth=<0-100>``
         smooth factor (default: 0)
-    ``--vo-image-jpeg-dpi=<1->``
+    ``jpeg-dpi=<1->``
         JPEG DPI (default: 72)
-    ``--vo-image-outdir=<dirname>``
+    ``outdir=<dirname>``
         Specify the directory to save the image files to (default: ``./``).
 
 ``wayland`` (Wayland only)
@@ -454,73 +983,78 @@ Available video output drivers are:
     .. note:: This driver is for compatibility with systems that don't provide
               working OpenGL drivers.
 
-    The following global options are supported by this video output:
-
-    ``--vo-wayland-alpha``
+    ``alpha``
         Use a buffer format that supports videos and images with alpha
         information
-    ``--vo-wayland-rgb565``
+    ``rgb565``
         Use RGB565 as buffer format. This format is implemented on most
         platforms, especially on embedded where it is far more efficient then
         RGB8888.
-    ``--vo-wayland-triple-buffering``
+    ``triple-buffering``
         Use 3 buffers instead of 2. This can lead to more fluid playback, but
         uses more memory.
 
 ``opengl-cb``
     For use with libmpv direct OpenGL embedding; useless in any other contexts.
     (See ``<mpv/opengl_cb.h>``.)
+    Usually, ``opengl-cb`` renders frames asynchronously by client and this
+    can cause some frame drops. In order to provide a way to handle this
+    situation, ``opengl-cb`` has its own frame queue and calls update callback
+    more frequently if the queue is not empty regardless of existence of new frame.
+    Once the queue is filled, ``opengl-cb`` drops frames automatically.
 
-    This also supports many of the options the ``opengl`` VO has.
+    With default options, ``opengl-cb`` renders only the latest frame and drops
+    all frames handed over while waiting render function after update callback.
+
+    ``frame-queue-size=<1..100>``
+        The maximum count of frames which the frame queue can hold (default: 1)
+
+    ``frame-drop-mode=<pop|clear|block>``
+        Select the behavior when the frame queue is full.
+
+        pop
+            Drop the oldest frame in the frame queue.
+        clear
+            Drop all frames in the frame queue.
+        block
+            Wait for a short time, behave like ``clear`` on timeout. (default)
+
+    This also supports many of the suboptions the ``opengl`` VO has. Run
+    ``mpv --vo=opengl-cb:help`` for a list.
+
+    This also supports the ``vo_cmdline`` command.
 
 ``rpi`` (Raspberry Pi)
     Native video output on the Raspberry Pi using the MMAL API.
 
-    This is deprecated. Use ``--vo=opengl`` instead, which is the default and
-    provides the same functionality. The ``rpi`` VO will be removed in
-    mpv 0.23.0. Its functionality was folded into --vo=opengl, which now uses
-    RPI hardware decoding by treating it as a hardware overlay (without applying
-    GL filtering). Also to be changed in 0.23.0: the --fs flag will be reset to
-    "no" by default (like on the other platforms).
-
-    The following deprecated global options are supported by this video output:
-
-    ``--rpi-display=<number>``
+    ``display=<number>``
         Select the display number on which the video overlay should be shown
         (default: 0).
 
-    ``--rpi-layer=<number>``
+    ``layer=<number>``
         Select the dispmanx layer on which the video overlay should be shown
         (default: -10). Note that mpv will also use the 2 layers above the
         selected layer, to handle the window background and OSD. Actual video
         rendering will happen on the layer above the selected layer.
 
-    ``--rpi-background=<yes|no>``
+    ``background=<yes|no>``
         Whether to render a black background behind the video (default: no).
         Normally it's better to kill the console framebuffer instead, which
         gives better performance.
 
-    ``--rpi-osd=<yes|no>``
-        Enabled by default. If disabled with ``no``, no OSD layer is created.
-        This also means there will be no subtitles rendered.
-
 ``drm`` (Direct Rendering Manager)
     Video output driver using Kernel Mode Setting / Direct Rendering Manager.
-    Should be used when one doesn't want to install full-blown graphical
-    environment (e.g. no X). Does not support hardware acceleration (if you
-    need this, check the ``drm`` backend for ``opengl`` VO).
+    Does not support hardware acceleration. Should be used when one doesn't
+    want to install full-blown graphical environment (e.g. no X).
 
-    The following global options are supported by this video output:
+    ``connector=<number>``
+        Select the connector to use (usually this is a monitor.) If set to -1,
+        mpv renders the output on the first available connector. (default: -1)
 
-    ``--drm-connector=[<gpu_number>.]<name>``
-        Select the connector to use (usually this is a monitor.) If ``<name>``
-        is empty or ``auto``, mpv renders the output on the first available
-        connector. Use ``--drm-connector=help`` to get list of available
-        connectors. When using multiple graphic cards, use the ``<gpu_number>``
-        argument to disambiguate.
-        (default: empty)
+    ``devpath=<filename>``
+        Path to graphic card device.
+        (default: /dev/dri/card0)
 
-    ``--drm-mode=<number>``
+    ``mode=<number>``
         Mode ID to use (resolution, bit depth and frame rate).
         (default: 0)
-

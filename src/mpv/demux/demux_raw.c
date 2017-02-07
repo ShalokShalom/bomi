@@ -22,8 +22,8 @@
 #include <unistd.h>
 #include <string.h>
 
-#include "options/m_config.h"
 #include "options/m_option.h"
+#include "options/options.h"
 
 #include "stream/stream.h"
 #include "demux.h"
@@ -36,7 +36,7 @@
 #include "osdep/endian.h"
 
 struct demux_rawaudio_opts {
-    struct m_channels channels;
+    struct mp_chmap channels;
     int samplerate;
     int aformat;
 };
@@ -49,13 +49,13 @@ struct demux_rawaudio_opts {
 #define OPT_BASE_STRUCT struct demux_rawaudio_opts
 const struct m_sub_options demux_rawaudio_conf = {
     .opts = (const m_option_t[]) {
-        OPT_CHANNELS("channels", channels, 0, .min = 1),
+        OPT_CHMAP("channels", channels, CONF_MIN, .min = 1),
         OPT_INTRANGE("rate", samplerate, 0, 1000, 8 * 48000),
         OPT_CHOICE("format", aformat, 0,
                    ({"u8",      PCM(0, 0,  8, 0)},
                     {"s8",      PCM(1, 0,  8, 0)},
                     {"u16le",   PCM(0, 0, 16, 0)}, {"u16be",    PCM(0, 0, 16, 1)},
-                    {"s16le",   PCM(1, 0, 16, 0)}, {"s16be",    PCM(1, 0, 16, 1)},
+                    {"s16le",   PCM(1, 0, 16, 0)}, {"u16be",    PCM(1, 0, 16, 1)},
                     {"u24le",   PCM(0, 0, 24, 0)}, {"u24be",    PCM(0, 0, 24, 1)},
                     {"s24le",   PCM(1, 0, 24, 0)}, {"s24be",    PCM(1, 0, 24, 1)},
                     {"u32le",   PCM(0, 0, 32, 0)}, {"u32be",    PCM(0, 0, 32, 1)},
@@ -75,11 +75,7 @@ const struct m_sub_options demux_rawaudio_conf = {
     .size = sizeof(struct demux_rawaudio_opts),
     .defaults = &(const struct demux_rawaudio_opts){
         // Note that currently, stream_cdda expects exactly these parameters!
-        .channels = {
-            .set = 1,
-            .chmaps = (struct mp_chmap[]){ MP_CHMAP_INIT_STEREO, },
-            .num_chmaps = 1,
-        },
+        .channels = MP_CHMAP_INIT_STEREO,
         .samplerate = 44100,
         .aformat = PCM(1, 0, 16, 0), // s16le
     },
@@ -121,7 +117,6 @@ const struct m_sub_options demux_rawvideo_conf = {
 };
 
 struct priv {
-    struct sh_stream *sh;
     int frame_size;
     int read_frames;
     double frame_rate;
@@ -129,40 +124,30 @@ struct priv {
 
 static int demux_rawaudio_open(demuxer_t *demuxer, enum demux_check check)
 {
-    struct demux_rawaudio_opts *opts =
-        mp_get_config_group(demuxer, demuxer->global, &demux_rawaudio_conf);
+    struct demux_rawaudio_opts *opts = demuxer->opts->demux_rawaudio;
+    struct sh_stream *sh;
+    sh_audio_t *sh_audio;
 
     if (check != DEMUX_CHECK_REQUEST && check != DEMUX_CHECK_FORCE)
         return -1;
 
-    if (opts->channels.num_chmaps != 1) {
-        MP_ERR(demuxer, "Invalid channels option given.\n");
-        return -1;
-    }
-
-    struct sh_stream *sh = demux_alloc_sh_stream(STREAM_AUDIO);
-    struct mp_codec_params *c = sh->codec;
-    c->channels = opts->channels.chmaps[0];
-    c->force_channels = true;
-    c->samplerate = opts->samplerate;
-
-    c->native_tb_num = 1;
-    c->native_tb_den = c->samplerate;
+    sh = new_sh_stream(demuxer, STREAM_AUDIO);
+    sh_audio = sh->audio;
+    sh_audio->channels = opts->channels;
+    sh_audio->force_channels = true;
+    sh_audio->samplerate = opts->samplerate;
 
     int f = opts->aformat;
-    // See PCM():               sign   float  bits    endian
-    mp_set_pcm_codec(sh->codec, f & 1, f & 2, f >> 3, f & 4);
+    // See PCM():        sign   float  bits    endian
+    mp_set_pcm_codec(sh, f & 1, f & 2, f >> 3, f & 4);
     int samplesize = ((f >> 3) + 7) / 8;
-
-    demux_add_sh_stream(demuxer, sh);
 
     struct priv *p = talloc_ptrtype(demuxer, p);
     demuxer->priv = p;
     *p = (struct priv) {
-        .sh = sh,
-        .frame_size = samplesize * c->channels.num,
-        .frame_rate = c->samplerate,
-        .read_frames = c->samplerate / 8,
+        .frame_size = samplesize * sh_audio->channels.num,
+        .frame_rate = sh_audio->samplerate,
+        .read_frames = sh_audio->samplerate / 8,
     };
 
     return 0;
@@ -170,8 +155,9 @@ static int demux_rawaudio_open(demuxer_t *demuxer, enum demux_check check)
 
 static int demux_rawvideo_open(demuxer_t *demuxer, enum demux_check check)
 {
-    struct demux_rawvideo_opts *opts =
-        mp_get_config_group(demuxer, demuxer->global, &demux_rawvideo_conf);
+    struct demux_rawvideo_opts *opts = demuxer->opts->demux_rawvideo;
+    struct sh_stream *sh;
+    sh_video_t *sh_video;
 
     if (check != DEMUX_CHECK_REQUEST && check != DEMUX_CHECK_FORCE)
         return -1;
@@ -233,22 +219,19 @@ static int demux_rawvideo_open(demuxer_t *demuxer, enum demux_check check)
         imgsize = width * height * bpp / 8;
     }
 
-    struct sh_stream *sh = demux_alloc_sh_stream(STREAM_VIDEO);
-    struct mp_codec_params *c = sh->codec;
-    c->codec = decoder;
-    c->codec_tag = imgfmt;
-    c->fps = opts->fps;
-    c->reliable_fps = true;
-    c->disp_w = width;
-    c->disp_h = height;
-    demux_add_sh_stream(demuxer, sh);
+    sh = new_sh_stream(demuxer, STREAM_VIDEO);
+    sh_video = sh->video;
+    sh->codec = decoder;
+    sh->codec_tag = imgfmt;
+    sh_video->fps = opts->fps;
+    sh_video->disp_w = width;
+    sh_video->disp_h = height;
 
     struct priv *p = talloc_ptrtype(demuxer, p);
     demuxer->priv = p;
     *p = (struct priv) {
-        .sh = sh,
         .frame_size = imgsize,
-        .frame_rate = c->fps,
+        .frame_rate = sh_video->fps,
         .read_frames = 1,
     };
 
@@ -273,20 +256,22 @@ static int raw_fill_buffer(demuxer_t *demuxer)
 
     int len = stream_read(demuxer->stream, dp->buffer, dp->len);
     demux_packet_shorten(dp, len);
-    demux_add_packet(p->sh, dp);
+    demux_add_packet(demuxer->streams[0], dp);
 
     return 1;
 }
 
-static void raw_seek(demuxer_t *demuxer, double seek_pts, int flags)
+static void raw_seek(demuxer_t *demuxer, double rel_seek_secs, int flags)
 {
     struct priv *p = demuxer->priv;
     stream_t *s = demuxer->stream;
     int64_t end = 0;
     stream_control(s, STREAM_CTRL_GET_SIZE, &end);
-    int64_t pos = seek_pts * p->frame_rate * p->frame_size;
+    int64_t pos = (flags & SEEK_ABSOLUTE) ? 0 : stream_tell(s);
     if (flags & SEEK_FACTOR)
-        pos = end * seek_pts;
+        pos += end * rel_seek_secs;
+    else
+        pos += rel_seek_secs * p->frame_rate * p->frame_size;
     if (pos < 0)
         pos = 0;
     if (end && pos > end)

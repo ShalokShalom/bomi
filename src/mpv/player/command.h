@@ -24,7 +24,6 @@ struct MPContext;
 struct mp_cmd;
 struct mp_log;
 struct mpv_node;
-struct m_config_option;
 
 void command_init(struct MPContext *mpctx);
 void command_uninit(struct MPContext *mpctx);
@@ -32,19 +31,16 @@ void command_uninit(struct MPContext *mpctx);
 int run_command(struct MPContext *mpctx, struct mp_cmd *cmd, struct mpv_node *res);
 char *mp_property_expand_string(struct MPContext *mpctx, const char *str);
 char *mp_property_expand_escaped_string(struct MPContext *mpctx, const char *str);
-void property_print_help(struct MPContext *mpctx);
+void property_print_help(struct mp_log *log);
 int mp_property_do(const char* name, int action, void* val,
                    struct MPContext *mpctx);
-
-int mp_on_set_option(void *ctx, struct m_config_option *co, void *data, int flags);
-void mp_option_change_callback(void *ctx, struct m_config_option *co, int flags);
 
 void mp_notify(struct MPContext *mpctx, int event, void *arg);
 void mp_notify_property(struct MPContext *mpctx, const char *property);
 
 void handle_command_updates(struct MPContext *mpctx);
 
-int mp_get_property_id(struct MPContext *mpctx, const char *name);
+int mp_get_property_id(const char *name);
 uint64_t mp_get_property_event_mask(const char *name);
 
 enum {
@@ -55,12 +51,14 @@ enum {
     MP_EVENT_CACHE_UPDATE,
     MP_EVENT_WIN_RESIZE,
     MP_EVENT_WIN_STATE,
-    MP_EVENT_CHANGE_PLAYLIST,
 };
 
 bool mp_hook_test_completion(struct MPContext *mpctx, char *type);
 void mp_hook_run(struct MPContext *mpctx, char *client, char *type);
 
-void mark_seek(struct MPContext *mpctx);
+void handle_ab_loop(struct MPContext *mpctx);
+
+void remove_deint_filter(struct MPContext *mpctx);
+void set_deinterlacing(struct MPContext *mpctx, bool enable);
 
 #endif /* MPLAYER_COMMAND_H */

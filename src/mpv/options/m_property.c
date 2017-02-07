@@ -30,14 +30,14 @@
 
 #include "libmpv/client.h"
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "m_option.h"
 #include "m_property.h"
 #include "common/msg.h"
 #include "common/common.h"
 
-struct m_property *m_property_list_find(const struct m_property *list,
-                                        const char *name)
+static struct m_property *m_property_list_find(const struct m_property *list,
+                                                     const char *name)
 {
     for (int n = 0; list && list[n].name; n++) {
         if (strcmp(list[n].name, name) == 0)
@@ -49,12 +49,14 @@ struct m_property *m_property_list_find(const struct m_property *list,
 static int do_action(const struct m_property *prop_list, const char *name,
                      int action, void *arg, void *ctx)
 {
+    const char *sep;
     struct m_property *prop;
     struct m_property_action_arg ka;
-    const char *sep = strchr(name, '/');
-    if (sep && sep[1]) {
-        char base[128];
-        snprintf(base, sizeof(base), "%.*s", (int)(sep - name), name);
+    if ((sep = strchr(name, '/')) && sep[1]) {
+        int len = sep - name;
+        char base[len + 1];
+        memcpy(base, name, len);
+        base[len] = 0;
         prop = m_property_list_find(prop_list, base);
         ka = (struct m_property_action_arg) {
             .key = sep + 1,
@@ -104,8 +106,16 @@ int m_property_do(struct mp_log *log, const struct m_property *prop_list,
         return str != NULL;
     }
     case M_PROPERTY_SET_STRING: {
-        struct mpv_node node = { .format = MPV_FORMAT_STRING, .u.string = arg };
-        return m_property_do(log, prop_list, name, M_PROPERTY_SET_NODE, &node, ctx);
+        if (!log)
+            return M_PROPERTY_ERROR;
+        bstr optname = bstr0(name), a, b;
+        if (bstr_split_tok(optname, "/", &a, &b))
+            optname = b;
+        if (m_option_parse(log, &opt, optname, bstr0(arg), &val) < 0)
+            return M_PROPERTY_ERROR;
+        r = do_action(prop_list, name, M_PROPERTY_SET, &val, ctx);
+        m_option_free(&opt, &val);
+        return r;
     }
     case M_PROPERTY_SWITCH: {
         if (!log)
@@ -115,11 +125,6 @@ int m_property_do(struct mp_log *log, const struct m_property *prop_list,
             M_PROPERTY_NOT_IMPLEMENTED)
             return r;
         // Fallback to m_option
-        r = m_property_do(log, prop_list, name, M_PROPERTY_GET_CONSTRICTED_TYPE,
-                          &opt, ctx);
-        if (r <= 0)
-            return r;
-        assert(opt.type);
         if (!opt.type->add)
             return M_PROPERTY_NOT_IMPLEMENTED;
         if ((r = do_action(prop_list, name, M_PROPERTY_GET, &val, ctx)) <= 0)
@@ -129,14 +134,16 @@ int m_property_do(struct mp_log *log, const struct m_property *prop_list,
         m_option_free(&opt, &val);
         return r;
     }
-    case M_PROPERTY_GET_CONSTRICTED_TYPE: {
-        if ((r = do_action(prop_list, name, action, arg, ctx)) >= 0)
-            return r;
-        if ((r = do_action(prop_list, name, M_PROPERTY_GET_TYPE, arg, ctx)) >= 0)
-            return r;
-        return M_PROPERTY_NOT_IMPLEMENTED;
-    }
     case M_PROPERTY_SET: {
+        if (!log)
+            return M_PROPERTY_ERROR;
+        m_option_copy(&opt, &val, arg);
+        r = opt.type->clamp ? opt.type->clamp(&opt, arg) : 0;
+        m_option_free(&opt, &val);
+        if (r != 0) {
+            mp_err(log, "Property '%s': invalid value.\n", name);
+            return M_PROPERTY_ERROR;
+        }
         return do_action(prop_list, name, M_PROPERTY_SET, arg, ctx);
     }
     case M_PROPERTY_GET_NODE: {
@@ -158,12 +165,11 @@ int m_property_do(struct mp_log *log, const struct m_property *prop_list,
         return r;
     }
     case M_PROPERTY_SET_NODE: {
-        if (!log)
-            return M_PROPERTY_ERROR;
         if ((r = do_action(prop_list, name, M_PROPERTY_SET_NODE, arg, ctx)) !=
             M_PROPERTY_NOT_IMPLEMENTED)
             return r;
-        int err = m_option_set_node_or_string(log, &opt, name, &val, arg);
+        struct mpv_node *node = arg;
+        int err = m_option_set_node(&opt, &val, node);
         if (err == M_OPT_UNKNOWN) {
             r = M_PROPERTY_NOT_IMPLEMENTED;
         } else if (err < 0) {

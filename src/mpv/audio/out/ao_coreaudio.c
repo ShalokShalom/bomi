@@ -39,6 +39,7 @@ struct priv {
     AudioStreamID original_asbd_stream;
 
     int change_physical_format;
+    int exclusive;
 };
 
 static int64_t ca_get_hardware_latency(struct ao *ao) {
@@ -132,6 +133,11 @@ static bool reinit_device(struct ao *ao) {
     OSStatus err = ca_select_device(ao, ao->device, &p->device);
     CHECK_CA_ERROR("failed to select device");
 
+    char *uid;
+    err = CA_GET_STR(p->device, kAudioDevicePropertyDeviceUID, &uid);
+    CHECK_CA_ERROR("failed to get device UID");
+    ao->detected_device = talloc_steal(ao, uid);
+
     return true;
 
 coreaudio_error:
@@ -142,7 +148,7 @@ static int init(struct ao *ao)
 {
     struct priv *p = ao->priv;
 
-    if (!af_fmt_is_pcm(ao->format) || (ao->init_flags & AO_INIT_EXCLUSIVE)) {
+    if (!af_fmt_is_pcm(ao->format) || p->exclusive) {
         MP_VERBOSE(ao, "redirecting to coreaudio_exclusive\n");
         ao->redirect = "coreaudio_exclusive";
         return CONTROL_ERROR;
@@ -174,8 +180,6 @@ static void init_physical_format(struct ao *ao)
     struct priv *p = ao->priv;
     OSErr err;
 
-    void *tmp = talloc_new(NULL);
-
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
 
@@ -185,8 +189,6 @@ static void init_physical_format(struct ao *ao)
     err = CA_GET_ARY_O(p->device, kAudioDevicePropertyStreams,
                        &streams, &n_streams);
     CHECK_CA_ERROR("could not get number of streams");
-
-    talloc_steal(tmp, streams);
 
     MP_VERBOSE(ao, "Found %zd substream(s).\n", n_streams);
 
@@ -202,7 +204,6 @@ static void init_physical_format(struct ao *ao)
         if (!CHECK_CA_WARN("could not get number of stream formats"))
             continue; // try next one
 
-        talloc_steal(tmp, formats);
 
         uint32_t direction;
         err = CA_GET(streams[i], kAudioStreamPropertyDirection, &direction);
@@ -231,12 +232,6 @@ static void init_physical_format(struct ao *ao)
                          &p->original_asbd);
             CHECK_CA_WARN("could not get current physical stream format");
 
-            if (ca_asbd_equals(&p->original_asbd, &best_asbd)) {
-                MP_VERBOSE(ao, "Requested format already set, not changing.\n");
-                p->original_asbd.mFormatID = 0;
-                break;
-            }
-
             if (!ca_change_physical_format_sync(ao, streams[i], best_asbd))
                 p->original_asbd = (AudioStreamBasicDescription){0};
             break;
@@ -244,7 +239,6 @@ static void init_physical_format(struct ao *ao)
     }
 
 coreaudio_error:
-    talloc_free(tmp);
     return;
 }
 
@@ -378,8 +372,8 @@ static int hotplug_init(struct ao *ao)
         err = AudioObjectAddPropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
         if (err != noErr) {
-            char *c1 = mp_tag_str(hotplug_properties[i]);
-            char *c2 = mp_tag_str(err);
+            char *c1 = fourcc_repr(hotplug_properties[i]);
+            char *c2 = fourcc_repr(err);
             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
             goto coreaudio_error;
         }
@@ -403,8 +397,8 @@ static void hotplug_uninit(struct ao *ao)
         err = AudioObjectRemovePropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
         if (err != noErr) {
-            char *c1 = mp_tag_str(hotplug_properties[i]);
-            char *c2 = mp_tag_str(err);
+            char *c1 = fourcc_repr(hotplug_properties[i]);
+            char *c2 = fourcc_repr(err);
             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
         }
     }
@@ -418,7 +412,7 @@ const struct ao_driver audio_out_coreaudio = {
     .uninit         = uninit,
     .init           = init,
     .control        = control,
-    .reset          = stop,
+    .pause          = stop,
     .resume         = start,
     .hotplug_init   = hotplug_init,
     .hotplug_uninit = hotplug_uninit,
@@ -426,7 +420,7 @@ const struct ao_driver audio_out_coreaudio = {
     .priv_size      = sizeof(struct priv),
     .options = (const struct m_option[]){
         OPT_FLAG("change-physical-format", change_physical_format, 0),
+        OPT_FLAG("exclusive", exclusive, 0),
         {0}
     },
-    .options_prefix = "coreaudio",
 };

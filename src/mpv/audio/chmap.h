@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef MP_CHMAP_H
@@ -22,7 +22,7 @@
 #include <stdbool.h>
 #include "misc/bstr.h"
 
-#define MP_NUM_CHANNELS 16
+#define MP_NUM_CHANNELS 8
 
 // Speaker a channel can be assigned to.
 // This corresponds to WAVEFORMATEXTENSIBLE channel mask bit indexes.
@@ -108,6 +108,10 @@ void mp_chmap_fill_na(struct mp_chmap *map, int num);
 
 void mp_chmap_from_channels(struct mp_chmap *dst, int num_channels);
 void mp_chmap_set_unknown(struct mp_chmap *dst, int num_channels);
+void mp_chmap_from_channels_alsa(struct mp_chmap *dst, int num_channels);
+
+void mp_chmap_remove_useless_channels(struct mp_chmap *map,
+                                      const struct mp_chmap *requested);
 
 uint64_t mp_chmap_to_lavc(const struct mp_chmap *src);
 uint64_t mp_chmap_to_lavc_unchecked(const struct mp_chmap *src);

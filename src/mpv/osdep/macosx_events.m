@@ -25,7 +25,7 @@
 #import <IOKit/hidsystem/ev_keymap.h>
 #import <Cocoa/Cocoa.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "input/event.h"
 #include "input/input.h"
 #include "input/keycodes.h"
@@ -60,8 +60,8 @@
 @end
 
 
-#define NSLeftAlternateKeyMask  (0x000020 | NSEventModifierFlagOption)
-#define NSRightAlternateKeyMask (0x000040 | NSEventModifierFlagOption)
+#define NSLeftAlternateKeyMask  (0x000020 | NSAlternateKeyMask)
+#define NSRightAlternateKeyMask (0x000040 | NSAlternateKeyMask)
 
 static bool LeftAltPressed(int mask)
 {
@@ -142,8 +142,7 @@ static int mk_flags(NSEvent *event)
     return ([event data1] & 0x0000FFFF);
 }
 
-static  int mk_down(NSEvent *event)
-{
+static  int mk_down(NSEvent *event) {
     return (((mk_flags(event) & 0xFF00) >> 8)) == 0xA;
 }
 
@@ -164,7 +163,7 @@ static CGEventRef tap_event_callback(CGEventTapProxy proxy, CGEventType type,
 
     NSEvent *nse = [NSEvent eventWithCGEvent:event];
 
-    if ([nse type] != NSEventTypeSystemDefined || [nse subtype] != 8)
+    if ([nse type] != NSSystemDefined || [nse subtype] != 8)
         // This is not a media key
         return event;
 
@@ -179,13 +178,11 @@ static CGEventRef tap_event_callback(CGEventTapProxy proxy, CGEventType type,
     }
 }
 
-void cocoa_init_media_keys(void)
-{
+void cocoa_init_media_keys(void) {
     [[EventsResponder sharedInstance] startMediaKeys];
 }
 
-void cocoa_uninit_media_keys(void)
-{
+void cocoa_uninit_media_keys(void) {
     [[EventsResponder sharedInstance] stopMediaKeys];
 }
 
@@ -288,7 +285,7 @@ void cocoa_set_input_context(struct input_ctx *input_context)
 
 - (void)startEventMonitor
 {
-    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown|NSEventMaskKeyUp
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSKeyDownMask|NSKeyUpMask
                                           handler:^(NSEvent *event) {
         BOOL equivalent = [[NSApp mainMenu] performKeyEquivalent:event];
         if (equivalent) {
@@ -398,14 +395,14 @@ void cocoa_set_input_context(struct input_ctx *input_context)
 - (int)mapKeyModifiers:(int)cocoaModifiers
 {
     int mask = 0;
-    if (cocoaModifiers & NSEventModifierFlagShift)
+    if (cocoaModifiers & NSShiftKeyMask)
         mask |= MP_KEY_MODIFIER_SHIFT;
-    if (cocoaModifiers & NSEventModifierFlagControl)
+    if (cocoaModifiers & NSControlKeyMask)
         mask |= MP_KEY_MODIFIER_CTRL;
     if (LeftAltPressed(cocoaModifiers) ||
         (RightAltPressed(cocoaModifiers) && ![self useAltGr]))
         mask |= MP_KEY_MODIFIER_ALT;
-    if (cocoaModifiers & NSEventModifierFlagCommand)
+    if (cocoaModifiers & NSCommandKeyMask)
         mask |= MP_KEY_MODIFIER_META;
     return mask;
 }
@@ -413,8 +410,8 @@ void cocoa_set_input_context(struct input_ctx *input_context)
 - (int)mapTypeModifiers:(NSEventType)type
 {
     NSDictionary *map = @{
-        @(NSEventTypeKeyDown) : @(MP_KEY_STATE_DOWN),
-        @(NSEventTypeKeyUp)   : @(MP_KEY_STATE_UP),
+        @(NSKeyDown) : @(MP_KEY_STATE_DOWN),
+        @(NSKeyUp)   : @(MP_KEY_STATE_UP),
     };
     return [map[@(type)] intValue];
 }
@@ -449,14 +446,12 @@ void cocoa_set_input_context(struct input_ctx *input_context)
 
     NSString *chars;
 
-    if ([self useAltGr] && RightAltPressed([event modifierFlags])) {
+    if ([self useAltGr] && RightAltPressed([event modifierFlags]))
         chars = [event characters];
-    } else {
+    else
         chars = [event charactersIgnoringModifiers];
-    }
 
-    struct bstr t = bstr0([chars UTF8String]);
-    int key = convert_key([event keyCode], bstr_decode_utf8(t, &t));
+    int key = convert_key([event keyCode], *[chars UTF8String]);
 
     if (key > -1)
         [self handleMPKey:key withMask:[self keyModifierMask:event]];
@@ -466,9 +461,6 @@ void cocoa_set_input_context(struct input_ctx *input_context)
 
 - (void)handleFilesArray:(NSArray *)files
 {
-    enum mp_dnd_action action = [NSEvent modifierFlags] &
-                                NSEventModifierFlagShift ? DND_APPEND : DND_REPLACE;
-
     size_t num_files  = [files count];
     char **files_utf8 = talloc_array(NULL, char*, num_files);
     [files enumerateObjectsUsingBlock:^(NSString *p, NSUInteger i, BOOL *_){
@@ -480,7 +472,7 @@ void cocoa_set_input_context(struct input_ctx *input_context)
     }];
     [_input_lock lock];
     if (_inputContext)
-        mp_event_drop_files(_inputContext, num_files, files_utf8, action);
+        mp_event_drop_files(_inputContext, num_files, files_utf8, DND_REPLACE);
     [_input_lock unlock];
     talloc_free(files_utf8);
 }

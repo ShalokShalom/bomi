@@ -36,7 +36,7 @@
 #include "libmpv/client.h"
 #include "player/client.h"
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 #include "common/common.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
@@ -106,21 +106,6 @@ const m_option_t *m_option_list_find(const m_option_t *list, const char *name)
     return m_option_list_findb(list, bstr0(name));
 }
 
-int m_option_set_node_or_string(struct mp_log *log, const m_option_t *opt,
-                                const char *name, void *dst, struct mpv_node *src)
-{
-    if (src->format == MPV_FORMAT_STRING) {
-        // The af and vf option unfortunately require this, because the
-        // option name includes the "action".
-        bstr optname = bstr0(name), a, b;
-        if (bstr_split_tok(optname, "/", &a, &b))
-            optname = b;
-        return m_option_parse(log, opt, optname, bstr0(src->u.string), dst);
-    } else {
-        return m_option_set_node(opt, dst, src);
-    }
-}
-
 // Default function that just does a memcpy
 
 static void copy_opt(const m_option_t *opt, void *dst, const void *src)
@@ -132,6 +117,14 @@ static void copy_opt(const m_option_t *opt, void *dst, const void *src)
 // Flag
 
 #define VAL(x) (*(int *)(x))
+
+static int clamp_flag(const m_option_t *opt, void *val)
+{
+    if (VAL(val) == 0 || VAL(val) == 1)
+        return 0;
+    VAL(val) = 0;
+    return M_OPT_OUT_OF_RANGE;
+}
 
 static int parse_flag(struct mp_log *log, const m_option_t *opt,
                       struct bstr name, struct bstr param, void *dst)
@@ -194,6 +187,7 @@ const m_option_type_t m_option_type_flag = {
     .print = print_flag,
     .copy  = copy_opt,
     .add = add_flag,
+    .clamp = clamp_flag,
     .set   = flag_set,
     .get   = flag_get,
 };
@@ -232,6 +226,45 @@ const m_option_type_t m_option_type_store = {
     .parse = parse_store,
     .copy  = copy_opt,
     .set   = store_set,
+};
+
+// Same for float types
+
+#undef VAL
+#define VAL(x) (*(float *)(x))
+
+static int parse_store_float(struct mp_log *log, const m_option_t *opt,
+                             struct bstr name, struct bstr param, void *dst)
+{
+    if (param.len == 0) {
+        if (dst)
+            VAL(dst) = opt->max;
+        return 0;
+    } else {
+        mp_err(log, "Invalid parameter for %.*s flag: %.*s\n",
+               BSTR_P(name), BSTR_P(param));
+        return M_OPT_DISALLOW_PARAM;
+    }
+}
+
+static int store_float_set(const m_option_t *opt, void *dst, struct mpv_node *src)
+{
+    if (src->format != MPV_FORMAT_FLAG)
+        return M_OPT_UNKNOWN;
+    if (!src->u.flag)
+        return M_OPT_INVALID;
+    VAL(dst) = opt->max;
+    return 1;
+}
+
+const m_option_type_t m_option_type_float_store = {
+    // can only be activated
+    .name  = "Flag",
+    .size  = sizeof(float),
+    .flags = M_OPT_TYPE_OPTIONAL_PARAM,
+    .parse = parse_store_float,
+    .copy  = copy_opt,
+    .set   = store_float_set,
 };
 
 // Integer
@@ -286,6 +319,14 @@ static int parse_longlong(struct mp_log *log, const m_option_t *opt,
         *(long long *)dst = tmp_int;
 
     return 1;
+}
+
+static int clamp_int(const m_option_t *opt, void *val)
+{
+    long long tmp = *(int *)val;
+    int r = clamp_longlong(opt, &tmp);
+    *(int *)val = tmp;
+    return r;
 }
 
 static int clamp_int64(const m_option_t *opt, void *val)
@@ -419,6 +460,7 @@ const m_option_type_t m_option_type_int = {
     .copy  = copy_opt,
     .add = add_int,
     .multiply = multiply_int,
+    .clamp = clamp_int,
     .set   = int_set,
     .get   = int_get,
 };
@@ -431,6 +473,7 @@ const m_option_type_t m_option_type_int64 = {
     .copy  = copy_opt,
     .add = add_int64,
     .multiply = multiply_int64,
+    .clamp = clamp_int64,
     .set   = int64_set,
     .get   = int64_get,
 };
@@ -486,6 +529,21 @@ const char *m_opt_choice_str(const struct m_opt_choice_alternatives *choices,
             return c->name;
     }
     return NULL;
+}
+
+static int clamp_choice(const m_option_t *opt, void *val)
+{
+    int v = *(int *)val;
+    if ((opt->flags & M_OPT_MIN) && (opt->flags & M_OPT_MAX)) {
+        if (v >= opt->min && v <= opt->max)
+            return 0;
+    }
+    ;
+    for (struct m_opt_choice_alternatives *alt = opt->priv; alt->name; alt++) {
+        if (alt->value == v)
+            return 0;
+    }
+    return M_OPT_INVALID;
 }
 
 static int parse_choice(struct mp_log *log, const struct m_option *opt,
@@ -599,8 +657,6 @@ static int choice_set(const m_option_t *opt, void *dst, struct mpv_node *src)
         src_str = buf;
     } else if (src->format == MPV_FORMAT_STRING) {
         src_str = src->u.string;
-    } else if (src->format == MPV_FORMAT_FLAG) {
-        src_str = src->u.flag ? "yes" : "no";
     }
     if (!src_str)
         return M_OPT_UNKNOWN;
@@ -642,19 +698,8 @@ static int choice_get(const m_option_t *opt, void *ta_parent,
             alt = NULL;
     }
     if (alt) {
-        int b = -1;
-        if (strcmp(alt->name, "yes") == 0) {
-            b = 1;
-        } else if (strcmp(alt->name, "no") == 0) {
-            b = 0;
-        }
-        if (b >= 0) {
-            dst->format = MPV_FORMAT_FLAG;
-            dst->u.flag = b;
-        } else {
-            dst->format = MPV_FORMAT_STRING;
-            dst->u.string = talloc_strdup(ta_parent, alt->name);
-        }
+        dst->format = MPV_FORMAT_STRING;
+        dst->u.string = talloc_strdup(ta_parent, alt->name);
     } else {
         dst->format = MPV_FORMAT_INT64;
         dst->u.int64 = ival;
@@ -677,6 +722,7 @@ const struct m_option_type m_option_type_choice = {
     .print = print_choice,
     .copy  = copy_opt,
     .add = add_choice,
+    .clamp = clamp_choice,
     .set   = choice_set,
     .get   = choice_get,
 };
@@ -820,8 +866,7 @@ static int clamp_double(const m_option_t *opt, void *val)
         v = opt->min;
         r = M_OPT_OUT_OF_RANGE;
     }
-    // (setting max/min to INFINITY/-INFINITY is allowed)
-    if (!isfinite(v) && v != opt->max && v != opt->min) {
+    if (!isfinite(v)) {
         v = opt->min;
         r = M_OPT_OUT_OF_RANGE;
     }
@@ -848,8 +893,22 @@ static int parse_double(struct mp_log *log, const m_option_t *opt,
         return M_OPT_INVALID;
     }
 
-    if (clamp_double(opt, &tmp_float) < 0) {
-        mp_err(log, "The %.*s option is out of range: %.*s\n",
+    if (opt->flags & M_OPT_MIN)
+        if (tmp_float < opt->min) {
+            mp_err(log, "The %.*s option must be >= %f: %.*s\n",
+                   BSTR_P(name), opt->min, BSTR_P(param));
+            return M_OPT_OUT_OF_RANGE;
+        }
+
+    if (opt->flags & M_OPT_MAX)
+        if (tmp_float > opt->max) {
+            mp_err(log, "The %.*s option must be <= %f: %.*s\n",
+                   BSTR_P(name), opt->max, BSTR_P(param));
+            return M_OPT_OUT_OF_RANGE;
+        }
+
+    if (!isfinite(tmp_float)) {
+        mp_err(log, "The %.*s option must be a finite number: %.*s\n",
                BSTR_P(name), BSTR_P(param));
         return M_OPT_OUT_OF_RANGE;
     }
@@ -903,7 +962,11 @@ static int double_set(const m_option_t *opt, void *dst, struct mpv_node *src)
     } else {
         return M_OPT_UNKNOWN;
     }
-    if (clamp_double(opt, &val) < 0)
+    if ((opt->flags & M_OPT_MIN) && val < opt->min)
+        return M_OPT_OUT_OF_RANGE;
+    if ((opt->flags & M_OPT_MAX) && val > opt->max)
+        return M_OPT_OUT_OF_RANGE;
+    if (!isfinite(val))
         return M_OPT_OUT_OF_RANGE;
     *(double *)dst = val;
     return 1;
@@ -925,6 +988,7 @@ const m_option_type_t m_option_type_double = {
     .print = print_double,
     .pretty_print = print_double_f3,
     .copy  = copy_opt,
+    .clamp = clamp_double,
     .add = add_double,
     .multiply = multiply_double,
     .set   = double_set,
@@ -933,6 +997,14 @@ const m_option_type_t m_option_type_double = {
 
 #undef VAL
 #define VAL(x) (*(float *)(x))
+
+static int clamp_float(const m_option_t *opt, void *val)
+{
+    double tmp = VAL(val);
+    int r = clamp_double(opt, &tmp);
+    VAL(val) = tmp;
+    return r;
+}
 
 static int parse_float(struct mp_log *log, const m_option_t *opt,
                        struct bstr name, struct bstr param, void *dst)
@@ -995,30 +1067,7 @@ const m_option_type_t m_option_type_float = {
     .copy  = copy_opt,
     .add = add_float,
     .multiply = multiply_float,
-    .set   = float_set,
-    .get   = float_get,
-};
-
-static int parse_float_aspect(struct mp_log *log, const m_option_t *opt,
-                              struct bstr name, struct bstr param, void *dst)
-{
-    if (bstr_equals0(param, "no")) {
-        if (dst)
-            VAL(dst) = 0.0f;
-        return 1;
-    }
-    return parse_float(log, opt, name, param, dst);
-}
-
-const m_option_type_t m_option_type_aspect = {
-    .name  = "Aspect",
-    .size  = sizeof(float),
-    .parse = parse_float_aspect,
-    .print = print_float,
-    .pretty_print = print_float_f3,
-    .copy  = copy_opt,
-    .add = add_float,
-    .multiply = multiply_float,
+    .clamp = clamp_float,
     .set   = float_set,
     .get   = float_get,
 };
@@ -1115,10 +1164,12 @@ static void free_str(void *src)
 const m_option_type_t m_option_type_string = {
     .name  = "String",
     .size  = sizeof(char *),
+    .flags = M_OPT_TYPE_DYNAMIC,
     .parse = parse_str,
     .print = print_str,
     .copy  = copy_str,
     .free  = free_str,
+    .clamp = clamp_str,
     .set   = str_set,
     .get   = str_get,
 };
@@ -1424,7 +1475,7 @@ const m_option_type_t m_option_type_string_list = {
      */
     .name  = "String list",
     .size  = sizeof(char **),
-    .flags = M_OPT_TYPE_ALLOW_WILDCARD,
+    .flags = M_OPT_TYPE_DYNAMIC | M_OPT_TYPE_ALLOW_WILDCARD,
     .parse = parse_str_list,
     .print = print_str_list,
     .copy  = copy_str_list,
@@ -1460,6 +1511,7 @@ static int parse_str_append_list(struct mp_log *log, const m_option_t *opt,
 const m_option_type_t m_option_type_string_append_list = {
     .name  = "String list",
     .size  = sizeof(char **),
+    .flags = M_OPT_TYPE_DYNAMIC,
     .parse = parse_str_append_list,
     .print = print_str_list,
     .copy  = copy_str_list,
@@ -1573,6 +1625,7 @@ static int keyvalue_list_get(const m_option_t *opt, void *ta_parent,
 const m_option_type_t m_option_type_keyvalue_list = {
     .name  = "Key/value list",
     .size  = sizeof(char **),
+    .flags = M_OPT_TYPE_DYNAMIC,
     .parse = parse_keyvalue_list,
     .print = print_keyvalue_list,
     .copy  = copy_str_list,
@@ -1601,7 +1654,7 @@ static int parse_msglevels(struct mp_log *log, const m_option_t *opt,
                            struct bstr name, struct bstr param, void *dst)
 {
     if (bstr_equals0(param, "help")) {
-        mp_info(log, "Syntax:\n\n   --msglevel=module1=level,module2=level,...\n\n"
+        mp_info(log, "Syntax: --msglevel=module1=level:module2=level:...\n"
                      "'module' is output prefix as shown with -v, or a prefix\n"
                      "of it. level is one of:\n\n"
                      "  fatal error warn info status v debug trace\n\n"
@@ -1639,6 +1692,7 @@ static int set_msglevels(const m_option_t *opt, void *dst,
 const m_option_type_t m_option_type_msglevels = {
     .name = "Output verbosity levels",
     .size  = sizeof(char **),
+    .flags = M_OPT_TYPE_DYNAMIC,
     .parse = parse_msglevels,
     .print = print_keyvalue_list,
     .copy  = copy_str_list,
@@ -1662,7 +1716,10 @@ const m_option_type_t m_option_type_print_fn = {
     .parse = parse_print,
 };
 
+
+/////////////////////// Subconfig
 #undef VAL
+#define VAL(x) (*(char ***)(x))
 
 // Read s sub-option name, or a positional sub-opt value.
 // termset is a string containing the set of chars that terminate an option.
@@ -1746,6 +1803,50 @@ static int split_subconf(struct mp_log *log, bstr optname, bstr *str,
     *out_val = subparam;
     return 0;
 }
+
+static int parse_subconf(struct mp_log *log, const m_option_t *opt,
+                         struct bstr name, struct bstr param, void *dst)
+{
+    int nr = 0;
+    char **lst = NULL;
+
+    if (param.len == 0)
+        return M_OPT_MISSING_PARAM;
+
+    struct bstr p = param;
+
+    while (p.len) {
+        bstr subopt, subparam;
+        int r = split_subconf(log, name, &p, &subopt, &subparam);
+        if (r < 0)
+            return r;
+        if (bstr_startswith0(p, ":"))
+            p = bstr_cut(p, 1);
+        else if (p.len > 0) {
+            mp_err(log, "Incorrect termination for '%.*s'\n", BSTR_P(subopt));
+            return M_OPT_INVALID;
+        }
+
+        if (dst) {
+            lst = talloc_realloc(NULL, lst, char *, 2 * (nr + 2));
+            lst[2 * nr] = bstrto0(lst, subopt);
+            lst[2 * nr + 1] = bstrto0(lst, subparam);
+            memset(&lst[2 * (nr + 1)], 0, 2 * sizeof(char *));
+            nr++;
+        }
+    }
+
+    if (dst)
+        VAL(dst) = lst;
+
+    return 1;
+}
+
+const m_option_type_t m_option_type_subconfig = {
+    .name = "Subconfig",
+    .flags = M_OPT_TYPE_HAS_CHILD,
+    .parse = parse_subconf,
+};
 
 #undef VAL
 
@@ -1960,10 +2061,6 @@ void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
         } else if (!(gm->w > 0) && gm->h > 0) {
             *widw = *widh * asp;
         }
-        // Center window after resize. If valid x:y values are passed to
-        // geometry, then those values will be overriden.
-        *xpos += prew / 2 - *widw / 2;
-        *ypos += preh / 2 - *widh / 2;
     }
 
     if (gm->xy_valid) {
@@ -2057,7 +2154,7 @@ static int parse_imgfmt(struct mp_log *log, const m_option_t *opt,
             mp_info(log, " %s", list[i]);
         mp_info(log, "\n");
         talloc_free(list);
-        return M_OPT_EXIT;
+        return M_OPT_EXIT - 1;
     }
 
     unsigned int fmt = mp_imgfmt_from_name(param, true);
@@ -2128,7 +2225,7 @@ static int parse_afmt(struct mp_log *log, const m_option_t *opt,
         for (int i = 1; i < AF_FORMAT_COUNT; i++)
             mp_info(log, " %s", af_fmt_to_str(i));
         mp_info(log, "\n");
-        return M_OPT_EXIT;
+        return M_OPT_EXIT - 1;
     }
 
     int fmt = 0;
@@ -2158,111 +2255,43 @@ const m_option_type_t m_option_type_afmt = {
 
 #include "audio/chmap.h"
 
-static int parse_channels(struct mp_log *log, const m_option_t *opt,
-                          struct bstr name, struct bstr param, void *dst)
+static int parse_chmap(struct mp_log *log, const m_option_t *opt,
+                       struct bstr name, struct bstr param, void *dst)
 {
-    // see OPT_CHANNELS for semantics.
-    bool limited = opt->min;
-
-    struct m_channels res = {0};
+    // min>0: at least min channels, min=0: empty ok
+    int min_ch = (opt->flags & M_OPT_MIN) ? opt->min : 1;
+    assert(min_ch >= 0);
 
     if (bstr_equals0(param, "help")) {
         mp_chmap_print_help(log);
-        if (!limited) {
-            mp_info(log, "\nOther values:\n"
-                         "    auto-safe\n");
-        }
-        return M_OPT_EXIT;
+        return M_OPT_EXIT - 1;
     }
 
-    bool auto_safe = bstr_equals0(param, "auto-safe");
-    if (bstr_equals0(param, "auto") || bstr_equals0(param, "empty") || auto_safe) {
-        if (limited) {
-            mp_err(log, "Disallowed parameter.\n");
-            return M_OPT_INVALID;
-        }
-        param.len = 0;
-        res.set = true;
-        res.auto_safe = auto_safe;
+    if (param.len == 0 && min_ch >= 1)
+        return M_OPT_MISSING_PARAM;
+
+    struct mp_chmap res = {0};
+    if (!mp_chmap_from_str(&res, param)) {
+        mp_err(log, "Error parsing channel layout: %.*s\n", BSTR_P(param));
+        return M_OPT_INVALID;
     }
 
-    while (param.len) {
-        bstr item;
-        if (limited) {
-            item = param;
-            param.len = 0;
-        } else {
-            bstr_split_tok(param, ",", &item, &param);
-        }
-
-        struct mp_chmap map = {0};
-        if (!mp_chmap_from_str(&map, item) || !mp_chmap_is_valid(&map)) {
-            mp_err(log, "Invalid channel layout: %.*s\n", BSTR_P(item));
-            talloc_free(res.chmaps);
-            return M_OPT_INVALID;
-        }
-
-        MP_TARRAY_APPEND(NULL, res.chmaps, res.num_chmaps, map);
-        res.set = true;
+    if (!mp_chmap_is_valid(&res) && !(min_ch == 0 && mp_chmap_is_empty(&res))) {
+        mp_err(log, "Invalid channel layout: %.*s\n", BSTR_P(param));
+        return M_OPT_INVALID;
     }
 
-    if (dst) {
-        *(struct m_channels *)dst = res;
-    } else {
-        talloc_free(res.chmaps);
-    }
+    if (dst)
+        *(struct mp_chmap *)dst = res;
 
     return 1;
 }
 
-static char *print_channels(const m_option_t *opt, const void *val)
-{
-    const struct m_channels *ch = val;
-    if (!ch->set)
-        return talloc_strdup(NULL, "");
-    if (ch->auto_safe)
-        return talloc_strdup(NULL, "auto-safe");
-    if (ch->num_chmaps > 0) {
-        char *res = talloc_strdup(NULL, "");
-        for (int n = 0; n < ch->num_chmaps; n++) {
-            if (n > 0)
-                res = talloc_strdup_append(res, ",");
-            res = talloc_strdup_append(res, mp_chmap_to_str(&ch->chmaps[n]));
-        }
-        return res;
-    }
-    return talloc_strdup(NULL, "auto");
-}
-
-static void free_channels(void *src)
-{
-    if (!src)
-        return;
-
-    struct m_channels *ch = src;
-    talloc_free(ch->chmaps);
-    *ch = (struct m_channels){0};
-}
-
-static void copy_channels(const m_option_t *opt, void *dst, const void *src)
-{
-    if (!(dst && src))
-        return;
-
-    struct m_channels *ch = dst;
-    free_channels(dst);
-    *ch = *(struct m_channels *)src;
-    ch->chmaps =
-        talloc_memdup(NULL, ch->chmaps, sizeof(ch->chmaps[0]) * ch->num_chmaps);
-}
-
-const m_option_type_t m_option_type_channels = {
+const m_option_type_t m_option_type_chmap = {
     .name  = "Audio channels or channel map",
-    .size  = sizeof(struct m_channels),
-    .parse = parse_channels,
-    .print = print_channels,
-    .copy  = copy_channels,
-    .free = free_channels,
+    .size  = sizeof(struct mp_chmap),
+    .parse = parse_chmap,
+    .copy  = copy_opt,
 };
 
 static int parse_timestring(struct bstr str, double *time, char endchar)
@@ -2354,6 +2383,7 @@ const m_option_type_t m_option_type_time = {
     .pretty_print = pretty_print_time,
     .copy  = copy_opt,
     .add = add_double,
+    .clamp = clamp_double,
     .set   = time_set,
     .get   = time_get,
 };
@@ -2601,21 +2631,17 @@ static void copy_obj_settings_list(const m_option_t *opt, void *dst,
 // without '=' sets a flag, or whether it's a positional argument.
 static int get_obj_param(struct mp_log *log, bstr opt_name, bstr obj_name,
                          struct m_config *config, bstr name, bstr val,
-                         int flags, bool nopos,
-                         int *nold, bstr *out_name, bstr *out_val)
+                         int flags, int *nold, bstr *out_name, bstr *out_val)
 {
     int r;
 
-    if (!config) {
-        *out_name = name; // preserve args for opengl-hq legacy handling
-        *out_val = val;
-        return 1;
-    }
+    if (!config)
+        return 0; // skip
 
     // va.start != NULL => of the form name=val (not positional)
     // If it's just "name", and the associated option exists and is a flag,
     // don't accept it as positional argument.
-    if (val.start || m_config_option_requires_param(config, name) == 0 || nopos) {
+    if (val.start || m_config_option_requires_param(config, name) == 0) {
         r = m_config_set_option_ext(config, name, val, flags);
         if (r < 0) {
             if (r == M_OPT_UNKNOWN) {
@@ -2623,7 +2649,7 @@ static int get_obj_param(struct mp_log *log, bstr opt_name, bstr obj_name,
                        BSTR_P(opt_name), BSTR_P(obj_name), BSTR_P(name));
                 return M_OPT_UNKNOWN;
             }
-            if (r != M_OPT_EXIT)
+            if (r > M_OPT_EXIT)
                 mp_err(log, "Option %.*s: "
                        "Error while parsing %.*s parameter %.*s (%.*s)\n",
                        BSTR_P(opt_name), BSTR_P(obj_name), BSTR_P(name),
@@ -2649,7 +2675,7 @@ static int get_obj_param(struct mp_log *log, bstr opt_name, bstr obj_name,
         }
         r = m_config_set_option_ext(config, bstr0(opt), val, flags);
         if (r < 0) {
-            if (r != M_OPT_EXIT)
+            if (r > M_OPT_EXIT)
                 mp_err(log, "Option %.*s: "
                        "Error while parsing %.*s parameter %s (%.*s)\n",
                        BSTR_P(opt_name), BSTR_P(obj_name), opt, BSTR_P(val));
@@ -2671,9 +2697,8 @@ static int get_obj_param(struct mp_log *log, bstr opt_name, bstr obj_name,
 // desc is optional.
 static int m_obj_parse_sub_config(struct mp_log *log, struct bstr opt_name,
                                   struct bstr name, struct bstr *pstr,
-                                  struct m_config *config, int flags, bool nopos,
-                                  struct m_obj_desc *desc,
-                                  const struct m_obj_list *list, char ***ret)
+                                  struct m_config *config, int flags,
+                                  struct m_obj_desc *desc, char ***ret)
 {
     int nold = 0;
     char **args = NULL;
@@ -2691,20 +2716,10 @@ static int m_obj_parse_sub_config(struct mp_log *log, struct bstr opt_name,
         r = split_subconf(log, opt_name, pstr, &fname, &fval);
         if (r < 0)
             goto exit;
-
-        if (list->use_global_options) {
-            mp_err(log, "Option %.*s: this option does not accept sub-options.\n",
-                   BSTR_P(opt_name));
-            mp_err(log, "Sub-options for --vo and --ao were removed from mpv in "
-                   "release 0.23.0.\nSee https://0x0.st/uM for details.\n");
-            r = M_OPT_INVALID;
-            goto exit;
-        }
-
         if (bstr_equals0(fname, "help"))
             goto print_help;
-        r = get_obj_param(log, opt_name, name, config, fname, fval, flags,
-                          nopos, &nold, &fname, &fval);
+        r = get_obj_param(log, opt_name, name, config, fname, fval, flags, &nold,
+                          &fname, &fval);
         if (r < 0)
             goto exit;
 
@@ -2735,12 +2750,12 @@ print_help: ;
     if (config) {
         if (desc->print_help)
             desc->print_help(log);
-        m_config_print_option_list(config, "*");
+        m_config_print_option_list(config);
     } else {
         mp_warn(log, "Option %.*s: item %.*s doesn't exist.\n",
                BSTR_P(opt_name), BSTR_P(name));
     }
-    r = M_OPT_EXIT;
+    r = M_OPT_EXIT - 1;
 
 exit:
     free_str_list(&args);
@@ -2759,7 +2774,6 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt,
     char **plist = NULL;
     struct m_obj_desc desc;
     bstr label = {0};
-    bool nopos = list->disallow_positional_parameters;
 
     if (bstr_eatstart0(pstr, "@")) {
         if (!bstr_split_tok(*pstr, ":", &label, pstr)) {
@@ -2795,7 +2809,7 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt,
         struct m_config *config = m_config_from_obj_desc_noalloc(NULL, log, &desc);
         bstr s = bstr0(desc.init_options);
         m_obj_parse_sub_config(log, opt, str, &s, config,
-                               M_SETOPT_CHECK_ONLY, nopos, NULL, list, &plist);
+                               M_SETOPT_CHECK_ONLY, NULL, &plist);
         assert(s.len == 0);
         talloc_free(config);
     }
@@ -2805,7 +2819,7 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt,
         if (!skip)
             config = m_config_from_obj_desc_noalloc(NULL, log, &desc);
         r = m_obj_parse_sub_config(log, opt, str, pstr, config,
-                                   M_SETOPT_CHECK_ONLY, nopos, &desc, list,
+                                   M_SETOPT_CHECK_ONLY, &desc,
                                    _ret ? &plist : NULL);
         talloc_free(config);
         if (r < 0)
@@ -2937,7 +2951,7 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
             }
         }
         mp_info(log, "\n");
-        return M_OPT_EXIT;
+        return M_OPT_EXIT - 1;
     }
 
     if (op == OP_CLR) {
@@ -3187,7 +3201,7 @@ static int get_obj_settings_list(const m_option_t *opt, void *ta_parent,
 const m_option_type_t m_option_type_obj_settings_list = {
     .name  = "Object settings list",
     .size  = sizeof(m_obj_settings_t *),
-    .flags = M_OPT_TYPE_ALLOW_WILDCARD,
+    .flags = M_OPT_TYPE_DYNAMIC | M_OPT_TYPE_ALLOW_WILDCARD,
     .parse = parse_obj_settings_list,
     .print = print_obj_settings_list,
     .copy  = copy_obj_settings_list,
@@ -3308,6 +3322,7 @@ static int node_get(const m_option_t *opt, void *ta_parent,
 const m_option_type_t m_option_type_node = {
     .name  = "Complex",
     .size  = sizeof(struct mpv_node),
+    .flags = M_OPT_TYPE_DYNAMIC,
     .parse = parse_node,
     .print = print_node,
     .copy  = copy_node,
@@ -3322,7 +3337,4 @@ const m_option_type_t m_option_type_alias = {
 };
 const m_option_type_t m_option_type_removed = {
     .name  = "removed",
-};
-const m_option_type_t m_option_type_subconfig = {
-    .name = "Subconfig",
 };

@@ -4,7 +4,6 @@
 struct timeline_part {
     double start;
     double source_start;
-    char *url;
     struct demuxer *source;
 };
 
@@ -15,9 +14,6 @@ struct timeline {
 
     // main source
     struct demuxer *demuxer;
-
-    bstr init_fragment;
-    bool dash;
 
     // All referenced files. The source file must be at sources[0].
     struct demuxer **sources;

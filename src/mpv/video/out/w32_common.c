@@ -21,51 +21,30 @@
 #include <assert.h>
 #include <windows.h>
 #include <windowsx.h>
-#include <dwmapi.h>
+#include <initguid.h>
 #include <ole2.h>
 #include <shobjidl.h>
-#include <avrt.h>
 
 #include "options/options.h"
 #include "input/keycodes.h"
 #include "input/input.h"
 #include "input/event.h"
-#include "stream/stream.h"
 #include "common/msg.h"
 #include "common/common.h"
 #include "vo.h"
 #include "win_state.h"
 #include "w32_common.h"
-#include "win32/displayconfig.h"
 #include "osdep/io.h"
 #include "osdep/threads.h"
 #include "osdep/w32_keyboard.h"
-#include "osdep/atomic.h"
+#include "osdep/atomics.h"
 #include "misc/dispatch.h"
 #include "misc/rendezvous.h"
-#include "mpv_talloc.h"
+#include "talloc.h"
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-#define HINST_THISCOMPONENT ((HINSTANCE)&__ImageBase)
-
-#ifndef WM_DPICHANGED
-#define WM_DPICHANGED (0x02E0)
-#endif
-
-#ifndef DPI_ENUMS_DECLARED
-typedef enum MONITOR_DPI_TYPE {
-    MDT_EFFECTIVE_DPI = 0,
-    MDT_ANGULAR_DPI = 1,
-    MDT_RAW_DPI = 2,
-    MDT_DEFAULT = MDT_EFFECTIVE_DPI
-} MONITOR_DPI_TYPE;
-#endif
+static const wchar_t classname[] = L"mpv";
 
 static __thread struct vo_w32_state *w32_thread_context;
-
-struct w32_api {
-    HRESULT (WINAPI *pGetDpiForMonitor)(HMONITOR, MONITOR_DPI_TYPE, UINT*, UINT*);
-};
 
 struct vo_w32_state {
     struct mp_log *log;
@@ -77,16 +56,11 @@ struct vo_w32_state {
     bool terminate;
     struct mp_dispatch_queue *dispatch; // used to run stuff on the GUI thread
 
-    struct w32_api api; // stores functions from dynamically loaded DLLs
-
     HWND window;
     HWND parent; // 0 normally, set in embedding mode
-    HHOOK parent_win_hook;
-    HWINEVENTHOOK parent_evt_hook;
 
-    HMONITOR monitor; // Handle of the current screen
-    struct mp_rect screenrc; // Size and virtual position of the current screen
-    char *color_profile; // Path of the current screen's color profile
+    // Size and virtual position of the current screen.
+    struct mp_rect screenrc;
 
     // last non-fullscreen extends (updated only on fullscreen or on initialization)
     int prev_width;
@@ -112,11 +86,11 @@ struct vo_w32_state {
     uint32_t o_dwidth;
     uint32_t o_dheight;
 
-    int dpi;
-
     bool disable_screensaver;
     bool cursor_visible;
-    atomic_uint event_flags;
+    int event_flags;
+    int mon_cnt;
+    int mon_id;
 
     BOOL tracking;
     TRACKMOUSEEVENT trackEvent;
@@ -131,20 +105,9 @@ struct vo_w32_state {
     int high_surrogate;
 
     ITaskbarList2 *taskbar_list;
-    ITaskbarList3 *taskbar_list3;
-    UINT tbtnCreatedMsg;
-    bool tbtnCreated;
-
-    struct voctrl_playback_state current_pstate;
 
     // updates on move/resize/displaychange
     double display_fps;
-
-    bool snapped;
-    int snap_dx;
-    int snap_dy;
-
-    HANDLE avrt_handle;
 };
 
 typedef struct tagDropTarget {
@@ -302,9 +265,8 @@ static HRESULT STDMETHODCALLTYPE DropTarget_Drop(IDropTarget* This,
     } else if (pDataObj->lpVtbl->GetData(pDataObj,
                                          &fmtetc_url, &medium) == S_OK) {
         // get the URL encoded in US-ASCII
-        wchar_t* wurl = GlobalLock(medium.hGlobal);
-        if (wurl != NULL) {
-            char *url = mp_to_utf8(NULL, wurl);
+        char* url = (char*)GlobalLock(medium.hGlobal);
+        if (url != NULL) {
             if (mp_event_drop_mime_data(t->w32->input_ctx, "text/uri-list",
                                         bstr0(url), action) > 0) {
                 MP_VERBOSE(t->w32, "received dropped URL: %s\n", url);
@@ -312,7 +274,6 @@ static HRESULT STDMETHODCALLTYPE DropTarget_Drop(IDropTarget* This,
                 MP_ERR(t->w32, "error getting dropped URL\n");
             }
 
-            talloc_free(url);
             GlobalUnlock(medium.hGlobal);
         }
 
@@ -346,7 +307,7 @@ static void DropTarget_Init(DropTarget* This, struct vo_w32_state *w32)
 
 static void add_window_borders(HWND hwnd, RECT *rc)
 {
-    AdjustWindowRect(rc, GetWindowLongPtrW(hwnd, GWL_STYLE), 0);
+    AdjustWindowRect(rc, GetWindowLong(hwnd, GWL_STYLE), 0);
 }
 
 // basically a reverse AdjustWindowRect (win32 doesn't appear to have this)
@@ -368,36 +329,38 @@ static LRESULT borderless_nchittest(struct vo_w32_state *w32, int x, int y)
     POINT mouse = { x, y };
     ScreenToClient(w32->window, &mouse);
 
-    // The horizontal frame should be the same size as the vertical frame,
-    // since the NONCLIENTMETRICS structure does not distinguish between them
-    int frame_size = GetSystemMetrics(SM_CXFRAME) +
-                     GetSystemMetrics(SM_CXPADDEDBORDER);
     // The diagonal size handles are slightly wider than the side borders
-    int diagonal_width = frame_size * 2 + GetSystemMetrics(SM_CXBORDER);
+    int handle_width = GetSystemMetrics(SM_CXSMSIZE) +
+                       GetSystemMetrics(SM_CXBORDER);
 
     // Hit-test top border
-    if (mouse.y < frame_size) {
-        if (mouse.x < diagonal_width)
+    int frame_height = GetSystemMetrics(SM_CYFRAME) +
+                       GetSystemMetrics(SM_CXPADDEDBORDER);
+    if (mouse.y < frame_height) {
+        if (mouse.x < handle_width)
             return HTTOPLEFT;
-        if (mouse.x >= w32->dw - diagonal_width)
+        if (mouse.x > w32->dw - handle_width)
             return HTTOPRIGHT;
         return HTTOP;
     }
 
     // Hit-test bottom border
-    if (mouse.y >= w32->dh - frame_size) {
-        if (mouse.x < diagonal_width)
+    if (mouse.y > w32->dh - frame_height) {
+        if (mouse.x < handle_width)
             return HTBOTTOMLEFT;
-        if (mouse.x >= w32->dw - diagonal_width)
+        if (mouse.x > w32->dw - handle_width)
             return HTBOTTOMRIGHT;
         return HTBOTTOM;
     }
 
     // Hit-test side borders
-    if (mouse.x < frame_size)
+    int frame_width = GetSystemMetrics(SM_CXFRAME) +
+                      GetSystemMetrics(SM_CXPADDEDBORDER);
+    if (mouse.x < frame_width)
         return HTLEFT;
-    if (mouse.x >= w32->dw - frame_size)
+    if (mouse.x > w32->dw - frame_width)
         return HTRIGHT;
+
     return HTCLIENT;
 }
 
@@ -596,7 +559,7 @@ static bool handle_char(struct vo_w32_state *w32, wchar_t wc)
 
 static void signal_events(struct vo_w32_state *w32, int events)
 {
-    atomic_fetch_or(&w32->event_flags, events);
+    w32->event_flags |= events;
     vo_wakeup(w32->vo);
 }
 
@@ -606,17 +569,22 @@ static void wakeup_gui_thread(void *ctx)
     PostMessage(w32->window, WM_USER, 0, 0);
 }
 
-static double get_refresh_rate_from_gdi(const wchar_t *device)
+static double vo_w32_get_display_fps(struct vo_w32_state *w32)
 {
-    DEVMODEW dm = { .dmSize = sizeof dm };
-    if (!EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &dm))
-        return 0.0;
+    // Get the device name of the monitor containing the window
+    HMONITOR mon = MonitorFromWindow(w32->window, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi = { .cbSize = sizeof mi };
+    GetMonitorInfoW(mon, (MONITORINFO*)&mi);
+
+    DEVMODE dm = { .dmSize = sizeof dm };
+    if (!EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm))
+        return -1;
 
     // May return 0 or 1 which "represent the display hardware's default refresh rate"
     // https://msdn.microsoft.com/en-us/library/windows/desktop/dd183565%28v=vs.85%29.aspx
     // mpv validates this value with a threshold of 1, so don't return exactly 1
     if (dm.dmDisplayFrequency == 1)
-        return 0.0;
+        return 0;
 
     // dm.dmDisplayFrequency is an integer which is rounded down, so it's
     // highly likely that 23 represents 24/1.001, 59 represents 60/1.001, etc.
@@ -638,180 +606,14 @@ static double get_refresh_rate_from_gdi(const wchar_t *device)
     return rv;
 }
 
-static char *get_color_profile(void *ctx, const wchar_t *device)
+static void update_display_fps(struct vo_w32_state *w32)
 {
-    char *name = NULL;
-
-    HDC ic = CreateICW(device, NULL, NULL, NULL);
-    if (!ic)
-        goto done;
-    wchar_t wname[MAX_PATH + 1];
-    if (!GetICMProfileW(ic, &(DWORD){ MAX_PATH }, wname))
-        goto done;
-
-    name = mp_to_utf8(ctx, wname);
-done:
-    if (ic)
-        DeleteDC(ic);
-    return name;
-}
-
-static void update_dpi(struct vo_w32_state *w32)
-{
-    UINT dpiX, dpiY;
-    if (w32->api.pGetDpiForMonitor && w32->api.pGetDpiForMonitor(w32->monitor,
-                                     MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
-        w32->dpi = (int)dpiX;
-        MP_VERBOSE(w32, "DPI detected from the new API: %d\n", w32->dpi);
-        return;
-    }
-    HDC hdc = GetDC(NULL);
-    if (hdc) {
-        w32->dpi = GetDeviceCaps(hdc, LOGPIXELSX);
-        ReleaseDC(NULL, hdc);
-        MP_VERBOSE(w32, "DPI detected from the old API: %d\n", w32->dpi);
-    } else {
-        w32->dpi = 96;
-        MP_VERBOSE(w32, "Couldn't determine DPI, falling back to %d\n", w32->dpi);
-    }
-}
-
-static void update_display_info(struct vo_w32_state *w32)
-{
-    HMONITOR monitor = MonitorFromWindow(w32->window, MONITOR_DEFAULTTOPRIMARY);
-    if (w32->monitor == monitor)
-        return;
-    w32->monitor = monitor;
-
-    update_dpi(w32);
-
-    MONITORINFOEXW mi = { .cbSize = sizeof mi };
-    GetMonitorInfoW(monitor, (MONITORINFO*)&mi);
-
-    // Try to get the monitor refresh rate.
-    double freq = 0.0;
-
-    if (freq == 0.0)
-        freq = mp_w32_displayconfig_get_refresh_rate(mi.szDevice);
-    if (freq == 0.0)
-        freq = get_refresh_rate_from_gdi(mi.szDevice);
-
-    if (freq != w32->display_fps) {
-        MP_VERBOSE(w32, "display-fps: %f\n", freq);
-        if (freq == 0.0)
-            MP_WARN(w32, "Couldn't determine monitor refresh rate\n");
-        w32->display_fps = freq;
+    double fps = vo_w32_get_display_fps(w32);
+    if (fps != w32->display_fps) {
+        w32->display_fps = fps;
         signal_events(w32, VO_EVENT_WIN_STATE);
+        MP_VERBOSE(w32, "display-fps: %f\n", fps);
     }
-
-    char *color_profile = get_color_profile(w32, mi.szDevice);
-    if ((color_profile == NULL) != (w32->color_profile == NULL) ||
-        (color_profile && strcmp(color_profile, w32->color_profile)))
-    {
-        if (color_profile)
-            MP_VERBOSE(w32, "color-profile: %s\n", color_profile);
-        talloc_free(w32->color_profile);
-        w32->color_profile = color_profile;
-        color_profile = NULL;
-        signal_events(w32, VO_EVENT_ICC_PROFILE_CHANGED);
-    }
-
-    talloc_free(color_profile);
-}
-
-static void force_update_display_info(struct vo_w32_state *w32)
-{
-    w32->monitor = 0;
-    update_display_info(w32);
-}
-
-static void update_playback_state(struct vo_w32_state *w32)
-{
-    struct voctrl_playback_state *pstate = &w32->current_pstate;
-
-    if (!w32->taskbar_list3 || !w32->tbtnCreated)
-        return;
-
-    if (!pstate->playing || !pstate->taskbar_progress) {
-        ITaskbarList3_SetProgressState(w32->taskbar_list3, w32->window,
-                                       TBPF_NOPROGRESS);
-        return;
-    }
-
-    ITaskbarList3_SetProgressValue(w32->taskbar_list3, w32->window,
-                                   pstate->percent_pos, 100);
-    ITaskbarList3_SetProgressState(w32->taskbar_list3, w32->window,
-                                   pstate->paused ? TBPF_PAUSED :
-                                                    TBPF_NORMAL);
-}
-
-static bool snap_to_screen_edges(struct vo_w32_state *w32, RECT *rc)
-{
-    if (!w32->opts->snap_window) {
-        w32->snapped = false;
-        return false;
-    }
-
-    RECT rect;
-    POINT cursor;
-    if (!GetWindowRect(w32->window, &rect) || !GetCursorPos(&cursor))
-        return false;
-    // Check for aero snapping
-    if ((rc->right - rc->left != rect.right - rect.left) ||
-        (rc->bottom - rc->top != rect.bottom - rect.top))
-        return false;
-
-    MONITORINFO mi = { .cbSize = sizeof(mi) };
-    if (!GetMonitorInfoW(w32->monitor, &mi))
-        return false;
-    // Get the work area to let the window snap to taskbar
-    RECT wr = mi.rcWork;
-
-    // Check for invisible borders and adjust the work area size
-    RECT frame = {0};
-    if (DwmGetWindowAttribute(w32->window, DWMWA_EXTENDED_FRAME_BOUNDS,
-                              &frame, sizeof(RECT)) == S_OK) {
-        wr.left -= frame.left - rect.left;
-        wr.top -= frame.top - rect.top;
-        wr.right += rect.right - frame.right;
-        wr.bottom += rect.bottom - frame.bottom;
-    }
-
-    // Let the window to unsnap by changing its position,
-    // otherwise it will stick to the screen edges forever
-    rect = *rc;
-    if (w32->snapped) {
-        OffsetRect(&rect, cursor.x - rect.left - w32->snap_dx,
-                          cursor.y - rect.top - w32->snap_dy);
-    }
-
-    int threshold = (w32->dpi * 16) / 96;
-    bool snapped = false;
-    // Adjust X position
-    if (abs(rect.left - wr.left) < threshold) {
-        snapped = true;
-        OffsetRect(&rect, wr.left - rect.left, 0);
-    } else if (abs(rect.right - wr.right) < threshold) {
-        snapped = true;
-        OffsetRect(&rect, wr.right - rect.right, 0);
-    }
-    // Adjust Y position
-    if (abs(rect.top - wr.top) < threshold) {
-        snapped = true;
-        OffsetRect(&rect, 0, wr.top - rect.top);
-    } else if (abs(rect.bottom - wr.bottom) < threshold) {
-        snapped = true;
-        OffsetRect(&rect, 0, wr.bottom - rect.bottom);
-    }
-
-    if (!w32->snapped && snapped) {
-        w32->snap_dx = cursor.x - rc->left;
-        w32->snap_dy = cursor.y - rc->top;
-    }
-
-    w32->snapped = snapped;
-    *rc = rect;
-    return true;
 }
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
@@ -839,45 +641,22 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         ClientToScreen(w32->window, &p);
         w32->window_x = p.x;
         w32->window_y = p.y;
-
-        // Window may intersect with new monitors (see VOCTRL_GET_DISPLAY_NAMES)
-        signal_events(w32, VO_EVENT_WIN_STATE);
-
-        update_display_info(w32);  // if we moved between monitors
-        MP_DBG(w32, "move window: %d:%d\n", w32->window_x, w32->window_y);
+        update_display_fps(w32);  // if we moved between monitors
+        MP_VERBOSE(w32, "move window: %d:%d\n", w32->window_x, w32->window_y);
         break;
     }
-    case WM_MOVING: {
-        RECT *rc = (RECT*)lParam;
-        if (snap_to_screen_edges(w32, rc))
-            return TRUE;
-        break;
-    }
-    case WM_ENTERSIZEMOVE:
-        if (w32->snapped) {
-            // Save the cursor offset from the window borders,
-            // so the player window can be unsnapped later
-            RECT rc;
-            POINT cursor;
-            if (GetWindowRect(w32->window, &rc) && GetCursorPos(&cursor)) {
-                w32->snap_dx = cursor.x - rc.left;
-                w32->snap_dy = cursor.y - rc.top;
-            }
-        }
-        break;
     case WM_SIZE: {
         RECT r;
         if (GetClientRect(w32->window, &r) && r.right > 0 && r.bottom > 0) {
             w32->dw = r.right;
             w32->dh = r.bottom;
+            update_display_fps(w32); // if we moved between monitors
             signal_events(w32, VO_EVENT_RESIZE);
             MP_VERBOSE(w32, "resize window: %d:%d\n", w32->dw, w32->dh);
         }
 
         // Window may have been minimized or restored
         signal_events(w32, VO_EVENT_WIN_STATE);
-
-        update_display_info(w32);
         break;
     }
     case WM_SIZING:
@@ -902,29 +681,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
             return TRUE;
         }
         break;
-    case WM_DPICHANGED:
-        update_display_info(w32);
-        break;
     case WM_CLOSE:
         // Don't actually allow it to destroy the window, or whatever else it
         // is that will make us lose WM_USER wakeups.
         mp_input_put_key(w32->input_ctx, MP_KEY_CLOSE_WIN);
         return 0;
-    case WM_NCDESTROY: // Sometimes only WM_NCDESTROY is received in --wid mode
     case WM_DESTROY:
-        if (w32->destroyed)
-            break;
-        // If terminate is not set, something else destroyed the window. This
-        // can also happen in --wid mode when the parent window is destroyed.
-        if (!w32->terminate)
-            mp_input_put_key(w32->input_ctx, MP_KEY_CLOSE_WIN);
-        RevokeDragDrop(w32->window);
         w32->destroyed = true;
         w32->window = NULL;
         PostQuitMessage(0);
-        break;
+        return 0;
     case WM_SYSCOMMAND:
-        switch (wParam & 0xFFF0) {
+        switch (wParam) {
         case SC_SCREENSAVE:
         case SC_MONITORPOWER:
             if (w32->disable_screensaver) {
@@ -1033,14 +801,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         mouse_button |= MP_KEY_STATE_UP;
         break;
     case WM_DISPLAYCHANGE:
-        force_update_display_info(w32);
+        update_display_fps(w32);
         break;
-    }
-
-    if (message == w32->tbtnCreatedMsg) {
-        w32->tbtnCreated = true;
-        update_playback_state(w32);
-        return 0;
     }
 
     if (mouse_button) {
@@ -1073,99 +835,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
     return DefWindowProcW(hWnd, message, wParam, lParam);
 }
 
-static pthread_once_t window_class_init_once = PTHREAD_ONCE_INIT;
-static ATOM window_class;
-static void register_window_class(void)
+static bool is_key_message(UINT msg)
 {
-    window_class = RegisterClassExW(&(WNDCLASSEXW) {
-        .cbSize = sizeof(WNDCLASSEXW),
-        .style = CS_HREDRAW | CS_VREDRAW,
-        .lpfnWndProc = WndProc,
-        .hInstance = HINST_THISCOMPONENT,
-        .hIcon = LoadIconW(HINST_THISCOMPONENT, L"IDI_ICON1"),
-        .hCursor = LoadCursor(NULL, IDC_ARROW),
-        .lpszClassName = L"mpv",
-    });
-}
-
-static ATOM get_window_class(void)
-{
-    pthread_once(&window_class_init_once, register_window_class);
-    return window_class;
-}
-
-static void resize_child_win(HWND parent)
-{
-    // Check if an mpv window is a child of this window. This will not
-    // necessarily be the case because the hook functions will run for all
-    // windows on the parent window's thread.
-    ATOM cls = get_window_class();
-    HWND child = FindWindowExW(parent, NULL, (LPWSTR)MAKEINTATOM(cls), NULL);
-    if (!child)
-        return;
-    // Make sure the window was created by this instance
-    if (GetWindowLongPtrW(child, GWLP_HINSTANCE) != (LONG_PTR)HINST_THISCOMPONENT)
-        return;
-
-    // Resize the mpv window to match its parent window's size
-    RECT rm, rp;
-    if (!GetClientRect(child, &rm))
-        return;
-    if (!GetClientRect(parent, &rp))
-        return;
-    if (EqualRect(&rm, &rp))
-        return;
-    SetWindowPos(child, NULL, 0, 0, rp.right, rp.bottom, SWP_ASYNCWINDOWPOS |
-        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
-}
-
-static LRESULT CALLBACK parent_win_hook(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode != HC_ACTION)
-        goto done;
-    CWPSTRUCT *cwp = (CWPSTRUCT*)lParam;
-    if (cwp->message != WM_WINDOWPOSCHANGED)
-        goto done;
-    resize_child_win(cwp->hwnd);
-done:
-    return CallNextHookEx(NULL, nCode, wParam, lParam);
-}
-
-static void CALLBACK parent_evt_hook(HWINEVENTHOOK hWinEventHook, DWORD event,
-    HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread,
-    DWORD dwmsEventTime)
-{
-    if (event != EVENT_OBJECT_LOCATIONCHANGE)
-        return;
-    if (!hwnd || idObject != OBJID_WINDOW || idChild != CHILDID_SELF)
-        return;
-    resize_child_win(hwnd);
-}
-
-static void install_parent_hook(struct vo_w32_state *w32)
-{
-    DWORD pid;
-    DWORD tid = GetWindowThreadProcessId(w32->parent, &pid);
-
-    // If the parent lives inside the current process, install a Windows hook
-    if (pid == GetCurrentProcessId()) {
-        w32->parent_win_hook = SetWindowsHookExW(WH_CALLWNDPROC,
-            parent_win_hook, NULL, tid);
-    } else {
-        // Otherwise, use a WinEvent hook. These don't seem to be as smooth as
-        // Windows hooks, but they can be delivered across process boundaries.
-        w32->parent_evt_hook = SetWinEventHook(
-            EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
-            NULL, parent_evt_hook, pid, tid, WINEVENT_OUTOFCONTEXT);
-    }
-}
-
-static void remove_parent_hook(struct vo_w32_state *w32)
-{
-    if (w32->parent_win_hook)
-        UnhookWindowsHookEx(w32->parent_win_hook);
-    if (w32->parent_evt_hook)
-        UnhookWinEvent(w32->parent_evt_hook);
+    return msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN ||
+           msg == WM_KEYUP || msg == WM_SYSKEYUP;
 }
 
 // Dispatch incoming window events and handle them.
@@ -1173,8 +846,24 @@ static void remove_parent_hook(struct vo_w32_state *w32)
 static void run_message_loop(struct vo_w32_state *w32)
 {
     MSG msg;
-    while (GetMessageW(&msg, 0, 0, 0) > 0)
+    while (GetMessageW(&msg, 0, 0, 0) > 0) {
+        // Only send IME messages to TranslateMessage
+        if (is_key_message(msg.message) && msg.wParam == VK_PROCESSKEY)
+            TranslateMessage(&msg);
         DispatchMessageW(&msg);
+
+        if (w32->parent) {
+            RECT r, rp;
+            BOOL res = GetClientRect(w32->window, &r);
+            res = res && GetClientRect(w32->parent, &rp);
+            if (res && (r.right != rp.right || r.bottom != rp.bottom))
+                MoveWindow(w32->window, 0, 0, rp.right, rp.bottom, FALSE);
+
+            // Window has probably been closed, e.g. due to parent program crash
+            if (!IsWindow(w32->parent))
+                mp_input_put_key(w32->input_ctx, MP_KEY_CLOSE_WIN);
+        }
+    }
 
     // Even if the message loop somehow exits, we still have to respond to
     // external requests until termination is requested.
@@ -1182,37 +871,24 @@ static void run_message_loop(struct vo_w32_state *w32)
         mp_dispatch_queue_process(w32->dispatch, 1000);
 }
 
-struct get_monitor_data {
-    int i;
-    int target;
-    HMONITOR mon;
-};
-
-static BOOL CALLBACK get_monitor_proc(HMONITOR mon, HDC dc, LPRECT r, LPARAM p)
+static BOOL CALLBACK mon_enum(HMONITOR hmon, HDC hdc, LPRECT r, LPARAM p)
 {
-    struct get_monitor_data *data = (struct get_monitor_data*)p;
+    struct vo_w32_state *w32 = (void *)p;
+    // this defaults to the last screen if specified number does not exist
+    w32->screenrc = (struct mp_rect){r->left, r->top, r->right, r->bottom};
 
-    if (data->i == data->target) {
-        data->mon = mon;
+    if (w32->mon_cnt == w32->mon_id)
         return FALSE;
-    }
-    data->i++;
+
+    w32->mon_cnt++;
     return TRUE;
 }
 
-static HMONITOR get_monitor(int id)
-{
-    struct get_monitor_data data = { .target = id };
-    EnumDisplayMonitors(NULL, NULL, get_monitor_proc, (LPARAM)&data);
-    return data.mon;
-}
-
-static void update_screen_rect(struct vo_w32_state *w32)
+static void w32_update_xinerama_info(struct vo_w32_state *w32)
 {
     struct mp_vo_opts *opts = w32->opts;
     int screen = w32->current_fs ? opts->fsscreen_id : opts->screen_id;
 
-    // Handle --fs-screen=all
     if (w32->current_fs && screen == -2) {
         struct mp_rect rc = {
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -1220,56 +896,63 @@ static void update_screen_rect(struct vo_w32_state *w32)
             GetSystemMetrics(SM_CXVIRTUALSCREEN),
             GetSystemMetrics(SM_CYVIRTUALSCREEN),
         };
+        if (!rc.x1 || !rc.y1) {
+            rc.x0 = rc.y0 = 0;
+            rc.x1 = w32->screenrc.x1;
+            rc.y1 = w32->screenrc.y1;
+        }
         rc.x1 += rc.x0;
         rc.y1 += rc.y0;
         w32->screenrc = rc;
+    } else if (screen == -1) {
+        MONITORINFO mi;
+        HMONITOR m = MonitorFromWindow(w32->window, MONITOR_DEFAULTTOPRIMARY);
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(m, &mi);
+        w32->screenrc = (struct mp_rect){
+            mi.rcMonitor.left, mi.rcMonitor.top,
+            mi.rcMonitor.right, mi.rcMonitor.bottom,
+        };
+    } else if (screen >= 0) {
+        w32->mon_cnt = 0;
+        w32->mon_id = screen;
+        EnumDisplayMonitors(NULL, NULL, mon_enum, (LONG_PTR)w32);
+    }
+}
+
+static void updateScreenProperties(struct vo_w32_state *w32)
+{
+    DEVMODE dm;
+    dm.dmSize = sizeof dm;
+    dm.dmDriverExtra = 0;
+    dm.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
+
+    if (!EnumDisplaySettings(0, ENUM_CURRENT_SETTINGS, &dm)) {
+        MP_ERR(w32, "unable to enumerate display settings!\n");
         return;
     }
 
-    // When not using --fs-screen=all, mpv belongs to a specific HMONITOR
-    HMONITOR mon;
-    if (screen == -1) {
-        // Handle --fs-screen=current and --screen=default
-        mon = MonitorFromWindow(w32->window, MONITOR_DEFAULTTOPRIMARY);
-    } else {
-        mon = get_monitor(screen);
-        if (!mon) {
-            MP_INFO(w32, "Screen %d does not exist, falling back to primary\n",
-                    screen);
-            mon = MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
-        }
-    }
-
-    MONITORINFO mi = { .cbSize = sizeof(mi) };
-    GetMonitorInfoW(mon, &mi);
-    w32->screenrc = (struct mp_rect){
-        mi.rcMonitor.left, mi.rcMonitor.top,
-        mi.rcMonitor.right, mi.rcMonitor.bottom,
-    };
+    w32->screenrc = (struct mp_rect){0, 0, dm.dmPelsWidth, dm.dmPelsHeight};
+    w32_update_xinerama_info(w32);
 }
 
 static DWORD update_style(struct vo_w32_state *w32, DWORD style)
 {
-    const DWORD NO_FRAME = WS_OVERLAPPED | WS_MINIMIZEBOX;
-    const DWORD FRAME = WS_OVERLAPPEDWINDOW;
-    const DWORD FULLSCREEN = NO_FRAME | WS_SYSMENU;
-    style &= ~(NO_FRAME | FRAME | FULLSCREEN);
-    if (w32->current_fs) {
-        style |= FULLSCREEN;
-    } else {
-        style |= w32->opts->border ? FRAME : NO_FRAME;
-    }
+    const DWORD NO_FRAME = WS_POPUP;
+    const DWORD FRAME = WS_OVERLAPPEDWINDOW | WS_SIZEBOX;
+    style &= ~(NO_FRAME | FRAME);
+    style |= (w32->opts->border && !w32->current_fs) ? FRAME : NO_FRAME;
     return style;
 }
 
 // Update the window title, position, size, and border style.
-static void reinit_window_state(struct vo_w32_state *w32)
+static int reinit_window_state(struct vo_w32_state *w32)
 {
     HWND layer = HWND_NOTOPMOST;
     RECT r;
 
     if (w32->parent)
-        return;
+        return 1;
 
     bool new_fs = w32->opts->fullscreen;
     bool toggle_fs = w32->current_fs != new_fs;
@@ -1280,13 +963,13 @@ static void reinit_window_state(struct vo_w32_state *w32)
                                            w32->window, w32->current_fs);
     }
 
-    DWORD style = update_style(w32, GetWindowLongPtrW(w32->window, GWL_STYLE));
+    DWORD style = update_style(w32, GetWindowLong(w32->window, GWL_STYLE));
 
     if (w32->opts->ontop)
         layer = HWND_TOPMOST;
 
     // xxx not sure if this can trigger any unwanted messages (WM_MOVE/WM_SIZE)
-    update_screen_rect(w32);
+    updateScreenProperties(w32);
 
     int screen_w = w32->screenrc.x1 - w32->screenrc.x0;
     int screen_h = w32->screenrc.y1 - w32->screenrc.y0;
@@ -1323,35 +1006,19 @@ static void reinit_window_state(struct vo_w32_state *w32)
     r.top = w32->window_y;
     r.bottom = r.top + w32->dh;
 
-    SetWindowLongPtrW(w32->window, GWL_STYLE, style);
+    SetWindowLong(w32->window, GWL_STYLE, style);
 
     RECT cr = r;
     add_window_borders(w32->window, &r);
-    // Check on client area size instead of window size on --fit-border=no
-    long o_w;
-    long o_h;
-    if( w32->opts->fit_border ) {
-        o_w = r.right - r.left;
-        o_h = r.bottom - r.top;
-    } else {
-        o_w = cr.right - cr.left;
-        o_h = cr.bottom - cr.top;
-    }
 
-    if ( !w32->current_fs && ( o_w > screen_w || o_h > screen_h ) )
+    if (!w32->current_fs &&
+        ((r.right - r.left) >= screen_w || (r.bottom - r.top) >= screen_h))
     {
         MP_VERBOSE(w32, "requested window size larger than the screen\n");
         // Use the aspect of the client area, not the full window size.
         // Basically, try to compute the maximum window size.
-        long n_w;
-        long n_h;
-        if( w32->opts->fit_border ) {
-            n_w = screen_w - (r.right - cr.right) - (cr.left - r.left);
-            n_h = screen_h - (r.bottom - cr.bottom) - (cr.top - r.top);
-        } else {
-            n_w = screen_w;
-            n_h = screen_h;
-        }
+        long n_w = screen_w - (r.right - cr.right) - (cr.left - r.left) - 1;
+        long n_h = screen_h - (r.bottom - cr.bottom) - (cr.top - r.top) - 1;
         // Letterbox
         double asp = (cr.right - cr.left) / (double)(cr.bottom - cr.top);
         double s_asp = n_w / (double)n_h;
@@ -1360,28 +1027,15 @@ static void reinit_window_state(struct vo_w32_state *w32)
         } else {
             n_w = n_h * asp;
         }
-        // Save new size
-        w32->dw = n_w;
-        w32->dh = n_h;
-        // Get old window center
-        long o_cx = r.left + (r.right - r.left) / 2;
-        long o_cy = r.top + (r.bottom - r.top) / 2;
-        // Add window borders to the new window size
         r = (RECT){.right = n_w, .bottom = n_h};
         add_window_borders(w32->window, &r);
-        // Get top and left border size for client area position calculation
-        long b_top = -r.top;
-        long b_left = -r.left;
-        // Center the final window around the old window center
+        // Center the final window
         n_w = r.right - r.left;
         n_h = r.bottom - r.top;
-        r.left = o_cx - n_w / 2;
-        r.top = o_cy - n_h / 2;
+        r.left = w32->screenrc.x0 + screen_w / 2 - n_w / 2;
+        r.top = w32->screenrc.y0 + screen_h / 2 - n_h / 2;
         r.right = r.left + n_w;
         r.bottom = r.top + n_h;
-        // Save new client area position
-        w32->window_x = r.left + b_left;
-        w32->window_y = r.top + b_top;
     }
 
     MP_VERBOSE(w32, "reset window bounds: %d:%d:%d:%d\n",
@@ -1392,20 +1046,30 @@ static void reinit_window_state(struct vo_w32_state *w32)
                  r.bottom - r.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
     signal_events(w32, VO_EVENT_RESIZE);
+
+    return 1;
 }
 
 static void gui_thread_reconfig(void *ptr)
 {
-    struct vo_w32_state *w32 = ptr;
+    void **p = ptr;
+    struct vo_w32_state *w32 = p[0];
+    uint32_t flags = *(uint32_t *)p[1];
+    int *res = p[2];
 
     struct vo *vo = w32->vo;
+
+    // we already have a fully initialized window, so nothing needs to be done
+    if (flags & VOFLAG_HIDDEN) {
+        *res = 1;
+        return;
+    }
 
     struct vo_win_geometry geo;
     vo_calc_window_geometry(vo, &w32->screenrc, &geo);
     vo_apply_window_geometry(vo, &geo);
 
     bool reset_size = w32->o_dwidth != vo->dwidth || w32->o_dheight != vo->dheight;
-    bool pos_init = false;
 
     w32->o_dwidth = vo->dwidth;
     w32->o_dheight = vo->dheight;
@@ -1422,7 +1086,6 @@ static void gui_thread_reconfig(void *ptr)
         } else {
             w32->window_bounds_initialized = true;
             reset_size = true;
-            pos_init = true;
             w32->window_x = w32->prev_x = geo.win.x0;
             w32->window_y = w32->prev_y = geo.win.y0;
         }
@@ -1438,44 +1101,20 @@ static void gui_thread_reconfig(void *ptr)
         vo->dheight = r.bottom;
     }
 
-    // Recenter window around old position on new video size
-    // excluding the case when initial position handled by win_state.
-    if (!pos_init) {
-        w32->window_x += w32->dw / 2 - vo->dwidth / 2;
-        w32->window_y += w32->dh / 2 - vo->dheight / 2;
-    }
     w32->dw = vo->dwidth;
     w32->dh = vo->dheight;
 
-    reinit_window_state(w32);
+    *res = reinit_window_state(w32);
 }
 
-// Resize the window. On the first call, it's also made visible.
-void vo_w32_config(struct vo *vo)
+// Resize the window. On the first non-VOFLAG_HIDDEN call, it's also made visible.
+int vo_w32_config(struct vo *vo, uint32_t flags)
 {
     struct vo_w32_state *w32 = vo->w32;
-    mp_dispatch_run(w32->dispatch, gui_thread_reconfig, w32);
-}
-
-static void thread_disable_ime(void)
-{
-    // Disables the IME for windows on this thread. imm32.dll must be loaded
-    // dynamically to account for machines without East Asian language support.
-    HMODULE imm32 = LoadLibraryW(L"imm32.dll");
-    if (!imm32)
-        return;
-    BOOL (WINAPI *pImmDisableIME)(DWORD) = (BOOL (WINAPI*)(DWORD))
-        GetProcAddress(imm32, "ImmDisableIME");
-    if (pImmDisableIME)
-        pImmDisableIME(0);
-    FreeLibrary(imm32);
-}
-
-static void w32_api_load(struct vo_w32_state *w32)
-{
-    HMODULE shcore_dll = LoadLibraryW(L"shcore.dll");
-    w32->api.pGetDpiForMonitor = !shcore_dll ? NULL :
-                (void *)GetProcAddress(shcore_dll, "GetDpiForMonitor");
+    int r;
+    void *p[] = {w32, &flags, &r};
+    mp_dispatch_run(w32->dispatch, gui_thread_reconfig, p);
+    return r;
 }
 
 static void *gui_thread(void *ptr)
@@ -1486,32 +1125,38 @@ static void *gui_thread(void *ptr)
 
     mpthread_set_name("win32 window");
 
-    w32_api_load(w32);
-    thread_disable_ime();
+    HINSTANCE hInstance = GetModuleHandleW(NULL);
+
+    WNDCLASSEXW wcex = {
+        .cbSize = sizeof wcex,
+        .style = CS_HREDRAW | CS_VREDRAW,
+        .lpfnWndProc = WndProc,
+        .hInstance = hInstance,
+        .hIcon = LoadIconW(hInstance, L"IDI_ICON1"),
+        .hCursor = LoadCursor(NULL, IDC_ARROW),
+        .lpszClassName = classname,
+    };
+    RegisterClassExW(&wcex);
 
     w32_thread_context = w32;
 
     if (w32->opts->WinID >= 0)
         w32->parent = (HWND)(intptr_t)(w32->opts->WinID);
 
-    ATOM cls = get_window_class();
     if (w32->parent) {
         RECT r;
         GetClientRect(w32->parent, &r);
-        w32->window = CreateWindowExW(WS_EX_NOPARENTNOTIFY,
-                                      (LPWSTR)MAKEINTATOM(cls), L"mpv",
+        w32->window = CreateWindowExW(WS_EX_NOPARENTNOTIFY, classname,
+                                      classname,
                                       WS_CHILD | WS_VISIBLE,
                                       0, 0, r.right, r.bottom,
-                                      w32->parent, 0, HINST_THISCOMPONENT, NULL);
-
-        // Install a hook to get notifications when the parent changes size
-        if (w32->window)
-            install_parent_hook(w32);
+                                      w32->parent, 0, hInstance, NULL);
     } else {
-        w32->window = CreateWindowExW(0, (LPWSTR)MAKEINTATOM(cls), L"mpv",
+        w32->window = CreateWindowExW(0, classname,
+                                      classname,
                                       update_style(w32, 0),
                                       CW_USEDEFAULT, SW_HIDE, 100, 100,
-                                      0, 0, HINST_THISCOMPONENT, NULL);
+                                      0, 0, hInstance, NULL);
     }
 
     if (!w32->window) {
@@ -1522,7 +1167,7 @@ static void *gui_thread(void *ptr)
     if (SUCCEEDED(OleInitialize(NULL))) {
         ole_ok = true;
 
-        fmtetc_url.cfFormat = (CLIPFORMAT)RegisterClipboardFormat(TEXT("UniformResourceLocatorW"));
+        fmtetc_url.cfFormat = (CLIPFORMAT)RegisterClipboardFormat(TEXT("UniformResourceLocator"));
         DropTarget* dropTarget = talloc(NULL, DropTarget);
         DropTarget_Init(dropTarget, w32);
         RegisterDragDrop(w32->window, &dropTarget->iface);
@@ -1536,20 +1181,6 @@ static void *gui_thread(void *ptr)
             if (FAILED(ITaskbarList2_HrInit(w32->taskbar_list))) {
                 ITaskbarList2_Release(w32->taskbar_list);
                 w32->taskbar_list = NULL;
-            }
-        }
-
-        // ITaskbarList3 has methods for status indication on taskbar buttons,
-        // however that interface is only available on Win7/2008 R2 or newer
-        if (SUCCEEDED(CoCreateInstance(&CLSID_TaskbarList, NULL,
-                                       CLSCTX_INPROC_SERVER, &IID_ITaskbarList3,
-                                       (void**)&w32->taskbar_list3)))
-        {
-            if (FAILED(ITaskbarList3_HrInit(w32->taskbar_list3))) {
-                ITaskbarList3_Release(w32->taskbar_list3);
-                w32->taskbar_list3 = NULL;
-            } else {
-                w32->tbtnCreatedMsg = RegisterWindowMessage(L"TaskbarButtonCreated");
             }
         }
     } else {
@@ -1568,7 +1199,7 @@ static void *gui_thread(void *ptr)
 
     w32->cursor_visible = true;
 
-    update_screen_rect(w32);
+    updateScreenProperties(w32);
 
     mp_dispatch_set_wakeup_fn(w32->dispatch, wakeup_gui_thread, w32);
 
@@ -1583,13 +1214,12 @@ done:
 
     MP_VERBOSE(w32, "uninit\n");
 
-    remove_parent_hook(w32);
-    if (w32->window && !w32->destroyed)
+    if (w32->window) {
+        RevokeDragDrop(w32->window);
         DestroyWindow(w32->window);
+    }
     if (w32->taskbar_list)
         ITaskbarList2_Release(w32->taskbar_list);
-    if (w32->taskbar_list3)
-        ITaskbarList3_Release(w32->taskbar_list3);
     if (ole_ok)
         OleUninitialize();
     SetThreadExecutionState(ES_CONTINUOUS);
@@ -1621,15 +1251,6 @@ int vo_w32_init(struct vo *vo)
         goto fail;
     }
 
-    // While the UI runs in its own thread, the thread in which this function
-    // runs in will be the renderer thread. Apply magic MMCSS cargo-cult,
-    // which might stop Windows from throttling clock rate and so on.
-    if (vo->opts->mmcss_profile[0]) {
-        wchar_t *profile = mp_from_utf8(NULL, vo->opts->mmcss_profile);
-        w32->avrt_handle = AvSetMmThreadCharacteristicsW(profile, &(DWORD){0});
-        talloc_free(profile);
-    }
-
     return 1;
 fail:
     talloc_free(w32);
@@ -1637,62 +1258,20 @@ fail:
     return 0;
 }
 
-struct disp_names_data {
-    HMONITOR assoc;
-    int count;
-    char **names;
-};
-
-static BOOL CALLBACK disp_names_proc(HMONITOR mon, HDC dc, LPRECT r, LPARAM p)
-{
-    struct disp_names_data *data = (struct disp_names_data*)p;
-
-    // get_disp_names() adds data->assoc to the list, so skip it here
-    if (mon == data->assoc)
-        return TRUE;
-
-    MONITORINFOEXW mi = { .cbSize = sizeof mi };
-    if (GetMonitorInfoW(mon, (MONITORINFO*)&mi)) {
-        MP_TARRAY_APPEND(NULL, data->names, data->count,
-                         mp_to_utf8(NULL, mi.szDevice));
-    }
-    return TRUE;
-}
-
-static char **get_disp_names(struct vo_w32_state *w32)
-{
-    // Get the client area of the window in screen space
-    RECT rect = { 0 };
-    GetClientRect(w32->window, &rect);
-    MapWindowPoints(w32->window, NULL, (POINT*)&rect, 2);
-
-    struct disp_names_data data = { .assoc = w32->monitor };
-
-    // Make sure the monitor that Windows considers to be associated with the
-    // window is first in the list
-    MONITORINFOEXW mi = { .cbSize = sizeof mi };
-    if (GetMonitorInfoW(data.assoc, (MONITORINFO*)&mi)) {
-        MP_TARRAY_APPEND(NULL, data.names, data.count,
-                         mp_to_utf8(NULL, mi.szDevice));
-    }
-
-    // Get the names of the other monitors that intersect the client rect
-    EnumDisplayMonitors(NULL, &rect, disp_names_proc, (LPARAM)&data);
-    MP_TARRAY_APPEND(NULL, data.names, data.count, NULL);
-    return data.names;
-}
-
 static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
 {
     switch (request) {
     case VOCTRL_FULLSCREEN:
+        w32->opts->fullscreen = !w32->opts->fullscreen;
         if (w32->opts->fullscreen != w32->current_fs)
             reinit_window_state(w32);
         return VO_TRUE;
     case VOCTRL_ONTOP:
+        w32->opts->ontop = !w32->opts->ontop;
         reinit_window_state(w32);
         return VO_TRUE;
     case VOCTRL_BORDER:
+        w32->opts->border = !w32->opts->border;
         reinit_window_state(w32);
         return VO_TRUE;
     case VOCTRL_GET_UNFS_WINDOW_SIZE: {
@@ -1711,13 +1290,9 @@ static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
         if (!w32->window_bounds_initialized)
             return VO_FALSE;
         if (w32->current_fs) {
-            w32->prev_x += w32->prev_width / 2 - s[0] / 2;
-            w32->prev_y += w32->prev_height / 2 - s[1] / 2;
             w32->prev_width = s[0];
             w32->prev_height = s[1];
         } else {
-            w32->window_x += w32->dw / 2 - s[0] / 2;
-            w32->window_y += w32->dh / 2 - s[1] / 2;
             w32->dw = s[0];
             w32->dh = s[1];
         }
@@ -1753,28 +1328,10 @@ static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
         talloc_free(title);
         return VO_TRUE;
     }
-    case VOCTRL_UPDATE_PLAYBACK_STATE: {
-        w32->current_pstate = *(struct voctrl_playback_state *)arg;
-
-        update_playback_state(w32);
-        return VO_TRUE;
-    }
     case VOCTRL_GET_DISPLAY_FPS:
-        update_display_info(w32);
+        update_display_fps(w32);
         *(double*) arg = w32->display_fps;
         return VO_TRUE;
-    case VOCTRL_GET_DISPLAY_NAMES:
-        *(char ***)arg = get_disp_names(w32);
-        return VO_TRUE;
-    case VOCTRL_GET_ICC_PROFILE:
-        update_display_info(w32);
-        if (w32->color_profile) {
-            bstr *p = arg;
-            *p = stream_read_file(w32->color_profile, NULL,
-                w32->vo->global, 100000000); // 100 MB
-            return p->len ? VO_TRUE : VO_FALSE;
-        }
-        return VO_FALSE;
     }
     return VO_NOTIMPL;
 }
@@ -1788,7 +1345,8 @@ static void do_control(void *ptr)
     void *arg = p[3];
     int *ret = p[4];
     *ret = gui_thread_control(w32, request, arg);
-    *events |= atomic_fetch_and(&w32->event_flags, 0);
+    *events |= w32->event_flags;
+    w32->event_flags = 0;
     // Safe access, since caller (owner of vo) is blocked.
     if (*events & VO_EVENT_RESIZE) {
         w32->vo->dwidth = w32->dw;
@@ -1799,21 +1357,10 @@ static void do_control(void *ptr)
 int vo_w32_control(struct vo *vo, int *events, int request, void *arg)
 {
     struct vo_w32_state *w32 = vo->w32;
-    if (request == VOCTRL_CHECK_EVENTS) {
-        *events |= atomic_fetch_and(&w32->event_flags, 0);
-        if (*events & VO_EVENT_RESIZE) {
-            mp_dispatch_lock(w32->dispatch);
-            vo->dwidth = w32->dw;
-            vo->dheight = w32->dh;
-            mp_dispatch_unlock(w32->dispatch);
-        }
-        return VO_TRUE;
-    } else {
-        int r;
-        void *p[] = {w32, events, &request, arg, &r};
-        mp_dispatch_run(w32->dispatch, do_control, p);
-        return r;
-    }
+    int r;
+    void *p[] = {w32, events, &request, arg, &r};
+    mp_dispatch_run(w32->dispatch, do_control, p);
+    return r;
 }
 
 static void do_terminate(void *ptr)
@@ -1823,8 +1370,6 @@ static void do_terminate(void *ptr)
 
     if (!w32->destroyed)
         DestroyWindow(w32->window);
-
-    mp_dispatch_interrupt(w32->dispatch);
 }
 
 void vo_w32_uninit(struct vo *vo)
@@ -1835,8 +1380,6 @@ void vo_w32_uninit(struct vo *vo)
 
     mp_dispatch_run(w32->dispatch, do_terminate, w32);
     pthread_join(w32->thread, NULL);
-
-    AvRevertMmThreadCharacteristics(w32->avrt_handle);
 
     talloc_free(w32);
     vo->w32 = NULL;

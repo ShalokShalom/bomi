@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -28,32 +28,19 @@
 #include <interface/mmal/util/mmal_default_components.h>
 #include <interface/mmal/vc/mmal_vc_api.h>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-
 #include <libavutil/rational.h>
+
+#include "osdep/atomics.h"
 
 #include "common/common.h"
 #include "common/msg.h"
 #include "options/m_config.h"
-#include "osdep/timer.h"
 #include "vo.h"
-#include "win_state.h"
 #include "video/mp_image.h"
 #include "sub/osd.h"
 
 #include "opengl/osd.h"
-
-struct mp_egl_rpi {
-    struct mp_log *log;
-    struct GL *gl;
-    EGLDisplay egl_display;
-    EGLConfig egl_config;
-    EGLContext egl_context;
-    EGLSurface egl_surface;
-    // yep, the API keeps a pointer to it
-    EGL_DISPMANX_WINDOW_T egl_window;
-};
+#include "opengl/rpi.h"
 
 struct priv {
     DISPMANX_DISPLAY_HANDLE_T display;
@@ -61,7 +48,6 @@ struct priv {
     DISPMANX_ELEMENT_HANDLE_T osd_overlay;
     DISPMANX_UPDATE_HANDLE_T update;
     uint32_t w, h;
-    uint32_t x, y;
     double display_fps;
 
     double osd_pts;
@@ -81,10 +67,11 @@ struct priv {
     // for RAM input
     MMAL_POOL_T *swpool;
 
-    pthread_mutex_t display_mutex;
-    pthread_cond_t display_cond;
+    atomic_bool update_display;
+
+    pthread_mutex_t vsync_mutex;
+    pthread_cond_t vsync_cond;
     int64_t vsync_counter;
-    bool reload_display;
 
     int background_layer;
     int video_layer;
@@ -93,129 +80,11 @@ struct priv {
     int display_nr;
     int layer;
     int background;
-    int enable_osd;
 };
 
 // Magic alignments (in pixels) expected by the MMAL internals.
 #define ALIGN_W 32
 #define ALIGN_H 16
-
-static void recreate_renderer(struct vo *vo);
-
-static void *get_proc_address(const GLubyte *name)
-{
-    void *p = eglGetProcAddress(name);
-    // EGL 1.4 (supported by the RPI firmware) does not necessarily return
-    // function pointers for core functions.
-    if (!p) {
-        void *h = dlopen("/opt/vc/lib/libGLESv2.so", RTLD_LAZY);
-        if (h) {
-            p = dlsym(h, name);
-            dlclose(h);
-        }
-    }
-    return p;
-}
-
-static EGLConfig select_fb_config_egl(struct mp_egl_rpi *p)
-{
-    EGLint attributes[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_DEPTH_SIZE, 0,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_NONE
-    };
-
-    EGLint config_count;
-    EGLConfig config;
-
-    eglChooseConfig(p->egl_display, attributes, &config, 1, &config_count);
-
-    if (!config_count) {
-        MP_FATAL(p, "Could find EGL configuration!\n");
-        return NULL;
-    }
-
-    return config;
-}
-
-static void mp_egl_rpi_destroy(struct mp_egl_rpi *p)
-{
-    if (p->egl_display) {
-        eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       EGL_NO_CONTEXT);
-    }
-    if (p->egl_surface)
-        eglDestroySurface(p->egl_display, p->egl_surface);
-    if (p->egl_context)
-        eglDestroyContext(p->egl_display, p->egl_context);
-    p->egl_context = EGL_NO_CONTEXT;
-    eglReleaseThread();
-    p->egl_display = EGL_NO_DISPLAY;
-    talloc_free(p->gl);
-    p->gl = NULL;
-}
-
-static int mp_egl_rpi_init(struct mp_egl_rpi *p, DISPMANX_ELEMENT_HANDLE_T window,
-                    int w, int h)
-{
-    p->egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (!eglInitialize(p->egl_display, NULL, NULL)) {
-        MP_FATAL(p, "EGL failed to initialize.\n");
-        goto fail;
-    }
-
-    eglBindAPI(EGL_OPENGL_ES_API);
-
-    EGLConfig config = select_fb_config_egl(p);
-    if (!config)
-        goto fail;
-
-    p->egl_window = (EGL_DISPMANX_WINDOW_T){
-        .element = window,
-        .width = w,
-        .height = h,
-    };
-    p->egl_surface = eglCreateWindowSurface(p->egl_display, config,
-                                            &p->egl_window, NULL);
-
-    if (p->egl_surface == EGL_NO_SURFACE) {
-        MP_FATAL(p, "Could not create EGL surface!\n");
-        goto fail;
-    }
-
-    EGLint context_attributes[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
-    p->egl_context = eglCreateContext(p->egl_display, config,
-                                      EGL_NO_CONTEXT, context_attributes);
-
-    if (p->egl_context == EGL_NO_CONTEXT) {
-        MP_FATAL(p, "Could not create EGL context!\n");
-        goto fail;
-    }
-
-    eglMakeCurrent(p->egl_display, p->egl_surface, p->egl_surface,
-                   p->egl_context);
-
-    p->gl = talloc_zero(NULL, struct GL);
-
-    const char *exts = eglQueryString(p->egl_display, EGL_EXTENSIONS);
-    mpgl_load_functions(p->gl, get_proc_address, exts, p->log);
-
-    if (!p->gl->version && !p->gl->es)
-        goto fail;
-
-    return 0;
-
-fail:
-    mp_egl_rpi_destroy(p);
-    return -1;
-}
 
 // Make mpi point to buffer, assuming MMAL_ENCODING_I420.
 // buffer can be NULL.
@@ -247,8 +116,6 @@ static size_t layout_buffer(struct mp_image *mpi, MMAL_BUFFER_HEADER_T *buffer,
 static void update_osd(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    if (!p->enable_osd)
-        return;
 
     mpgl_osd_generate(p->osd, p->osd_res, p->osd_pts, 0, 0);
 
@@ -258,8 +125,6 @@ static void update_osd(struct vo *vo)
         return;
     }
     p->osd_change_counter = osd_change_counter;
-
-    MP_STATS(vo, "start rpi_osd");
 
     p->egl.gl->ClearColor(0, 0, 0, 0);
     p->egl.gl->Clear(GL_COLOR_BUFFER_BIT);
@@ -272,12 +137,12 @@ static void update_osd(struct vo *vo)
         switch (fmt) {
         case SUBBITMAP_RGBA: {
             GLSLF("// OSD (RGBA)\n");
-            GLSL(color = texture(osdtex, texcoord).bgra;)
+            GLSL(vec4 color = texture(osdtex, texcoord).bgra;)
             break;
         }
         case SUBBITMAP_LIBASS: {
             GLSLF("// OSD (libass)\n");
-            GLSL(color =
+            GLSL(vec4 color =
                 vec4(ass_color.rgb, ass_color.a * texture(osdtex, texcoord).r);)
             break;
         }
@@ -285,12 +150,9 @@ static void update_osd(struct vo *vo)
             abort();
         }
         gl_sc_set_vao(p->sc, mpgl_osd_get_vao(p->osd));
-        gl_sc_generate(p->sc);
-        mpgl_osd_draw_part(p->osd, p->osd_res.w, -p->osd_res.h, n);
-        gl_sc_reset(p->sc);
+        gl_sc_gen_shader_and_reset(p->sc);
+        mpgl_osd_draw_part(p->osd, p->w, -p->h, n);
     }
-
-    MP_STATS(vo, "stop rpi_osd");
 }
 
 static void resize(struct vo *vo)
@@ -302,38 +164,18 @@ static void resize(struct vo *vo)
 
     vo_get_src_dst_rects(vo, &src, &dst, &p->osd_res);
 
-    int rotate[] = {MMAL_DISPLAY_ROT0,
-                    MMAL_DISPLAY_ROT90,
-                    MMAL_DISPLAY_ROT180,
-                    MMAL_DISPLAY_ROT270};
-
-
-    int src_w = src.x1 - src.x0, src_h = src.y1 - src.y0,
-        dst_w = dst.x1 - dst.x0, dst_h = dst.y1 - dst.y0;
-    int p_x, p_y;
-    av_reduce(&p_x, &p_y, dst_w * src_h, src_w * dst_h, 16000);
     MMAL_DISPLAYREGION_T dr = {
         .hdr = { .id = MMAL_PARAMETER_DISPLAYREGION,
                  .size = sizeof(MMAL_DISPLAYREGION_T), },
-        .src_rect = { .x = src.x0, .y = src.y0, .width = src_w, .height = src_h },
-        .dest_rect = { .x = dst.x0 + p->x, .y = dst.y0 + p->y,
-                       .width = dst_w, .height = dst_h },
+        .src_rect = { .x = src.x0, .y = src.y0,
+                      .width = src.x1 - src.x0, .height = src.y1 - src.y0, },
+        .dest_rect = { .x = dst.x0, .y = dst.y0,
+                       .width = dst.x1 - dst.x0, .height = dst.y1 - dst.y0, },
         .layer = p->video_layer,
         .display_num = p->display_nr,
-        .pixel_x = p_x,
-        .pixel_y = p_y,
-        .transform = rotate[vo->params ? vo->params->rotate / 90 : 0],
-        .fullscreen = vo->opts->fullscreen,
         .set = MMAL_DISPLAY_SET_SRC_RECT | MMAL_DISPLAY_SET_DEST_RECT |
-               MMAL_DISPLAY_SET_LAYER | MMAL_DISPLAY_SET_NUM |
-               MMAL_DISPLAY_SET_PIXEL | MMAL_DISPLAY_SET_TRANSFORM |
-               MMAL_DISPLAY_SET_FULLSCREEN,
+               MMAL_DISPLAY_SET_LAYER | MMAL_DISPLAY_SET_NUM,
     };
-
-    if (vo->params && (vo->params->rotate % 180) == 90) {
-        MPSWAP(int, dr.src_rect.x, dr.src_rect.y);
-        MPSWAP(int, dr.src_rect.width, dr.src_rect.height);
-    }
 
     if (mmal_port_parameter_set(input, &dr.hdr))
         MP_WARN(vo, "could not set video rectangle\n");
@@ -376,26 +218,17 @@ static int update_display_size(struct vo *vo)
 
     MP_VERBOSE(vo, "Display size: %dx%d\n", p->w, p->h);
 
-    return 0;
-}
-
-static int create_overlays(struct vo *vo)
-{
-    struct priv *p = vo->priv;
     destroy_overlays(vo);
 
-    if (!p->display)
-        return -1;
+    // Use the whole screen.
+    VC_RECT_T dst = {.width = p->w, .height = p->h};
+    VC_RECT_T src = {.width = 1 << 16, .height = 1 << 16};
+    VC_DISPMANX_ALPHA_T alpha = {
+        .flags = DISPMANX_FLAGS_ALPHA_FIXED_ALL_PIXELS,
+        .opacity = 0xFF,
+    };
 
-    if (vo->opts->fullscreen && p->background) {
-        // Use the whole screen.
-        VC_RECT_T dst = {.width = p->w, .height = p->h};
-        VC_RECT_T src = {.width = 1 << 16, .height = 1 << 16};
-        VC_DISPMANX_ALPHA_T alpha = {
-            .flags = DISPMANX_FLAGS_ALPHA_FIXED_ALL_PIXELS,
-            .opacity = 0xFF,
-        };
-
+    if (p->background) {
         p->window = vc_dispmanx_element_add(p->update, p->display,
                                             p->background_layer,
                                             &dst, 0, &src,
@@ -407,34 +240,27 @@ static int create_overlays(struct vo *vo)
         }
     }
 
-    if (p->enable_osd) {
-        VC_RECT_T dst = {.x = p->x, .y = p->y,
-                         .width = p->osd_res.w, .height = p->osd_res.h};
-        VC_RECT_T src = {.width = p->osd_res.w << 16, .height = p->osd_res.h << 16};
-        VC_DISPMANX_ALPHA_T alpha = {
-            .flags = DISPMANX_FLAGS_ALPHA_FROM_SOURCE,
-            .opacity = 0xFF,
-        };
-        p->osd_overlay = vc_dispmanx_element_add(p->update, p->display,
-                                                 p->osd_layer,
-                                                 &dst, 0, &src,
-                                                 DISPMANX_PROTECTION_NONE,
-                                                 &alpha, 0, 0);
-        if (!p->osd_overlay) {
-            MP_FATAL(vo, "Could not add DISPMANX element.\n");
-            return -1;
-        }
-
-        if (mp_egl_rpi_init(&p->egl, p->osd_overlay,
-                            p->osd_res.w, p->osd_res.h) < 0)
-        {
-            MP_FATAL(vo, "EGL/GLES initialization for OSD renderer failed.\n");
-            return -1;
-        }
-        p->sc = gl_sc_create(p->egl.gl, vo->log),
-        p->osd = mpgl_osd_init(p->egl.gl, vo->log, vo->osd);
-        p->osd_change_counter = -1; // force initial overlay rendering
+    alpha = (VC_DISPMANX_ALPHA_T){
+        .flags = DISPMANX_FLAGS_ALPHA_FROM_SOURCE,
+        .opacity = 0xFF,
+    };
+    p->osd_overlay = vc_dispmanx_element_add(p->update, p->display,
+                                             p->osd_layer,
+                                             &dst, 0, &src,
+                                             DISPMANX_PROTECTION_NONE,
+                                             &alpha, 0, 0);
+    if (!p->osd_overlay) {
+        MP_FATAL(vo, "Could not add DISPMANX element.\n");
+        return -1;
     }
+
+    if (mp_egl_rpi_init(&p->egl, p->osd_overlay, p->w, p->h) < 0) {
+        MP_FATAL(vo, "EGL/GLES initialization for OSD renderer failed.\n");
+        return -1;
+    }
+    p->sc = gl_sc_create(p->egl.gl, vo->log, vo->global),
+    p->osd = mpgl_osd_init(p->egl.gl, vo->log, vo->osd);
+    p->osd_change_counter = -1; // force initial overlay rendering
 
     p->display_fps = 0;
     TV_GET_STATE_RESP_T tvstate;
@@ -462,53 +288,19 @@ static int create_overlays(struct vo *vo)
     return 0;
 }
 
-static int set_geometry(struct vo *vo)
-{
-    struct priv *p = vo->priv;
-
-    if (vo->opts->fullscreen) {
-        vo->dwidth = p->w;
-        vo->dheight = p->h;
-        p->x = p->y = 0;
-    } else {
-        struct vo_win_geometry geo;
-        struct mp_rect screenrc = {0, 0, p->w, p->h};
-
-        vo_calc_window_geometry(vo, &screenrc, &geo);
-        vo_apply_window_geometry(vo, &geo);
-
-        p->x = geo.win.x0;
-        p->y = geo.win.y0;
-    }
-
-    resize(vo);
-
-    if (create_overlays(vo) < 0)
-        return -1;
-
-    return 0;
-}
-
 static void wait_next_vsync(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    pthread_mutex_lock(&p->display_mutex);
-    struct timespec end = mp_rel_time_to_timespec(0.050);
+    pthread_mutex_lock(&p->vsync_mutex);
     int64_t old = p->vsync_counter;
-    while (old == p->vsync_counter && !p->reload_display) {
-        if (pthread_cond_timedwait(&p->display_cond, &p->display_mutex, &end))
-            break;
-    }
-    pthread_mutex_unlock(&p->display_mutex);
+    while (old == p->vsync_counter)
+        pthread_cond_wait(&p->vsync_cond, &p->vsync_mutex);
+    pthread_mutex_unlock(&p->vsync_mutex);
 }
 
 static void flip_page(struct vo *vo)
 {
     struct priv *p = vo->priv;
-
-    if (!p->renderer_enabled)
-        return;
-
     struct mp_image *mpi = p->next_image;
     p->next_image = NULL;
 
@@ -544,9 +336,6 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
 
-    if (!p->renderer_enabled)
-        return;
-
     mp_image_t *mpi = NULL;
     if (!frame->redraw && !frame->repeat)
         mpi = mp_image_new_ref(frame->current);
@@ -575,7 +364,8 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
         }
         mmal_buffer_header_reset(buffer);
 
-        struct mp_image *new_ref = mp_image_new_custom_ref(NULL, buffer,
+        struct mp_image *new_ref = mp_image_new_custom_ref(&(struct mp_image){0},
+                                                           buffer,
                                                            free_mmal_buffer);
         if (!new_ref) {
             mmal_buffer_header_release(buffer);
@@ -642,23 +432,27 @@ static void disable_renderer(struct vo *vo)
     p->renderer_enabled = false;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params)
+static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
 {
     struct priv *p = vo->priv;
     MMAL_PORT_T *input = p->renderer->input[0];
     bool opaque = params->imgfmt == IMGFMT_MMAL;
 
-    if (!p->display)
-        return -1;
+    vo->dwidth = p->w;
+    vo->dheight = p->h;
 
     disable_renderer(vo);
+
+    AVRational dr = {params->d_w, params->d_h};
+    AVRational ir = {params->w, params->h};
+    AVRational par = av_div_q(dr, ir);
 
     input->format->encoding = opaque ? MMAL_ENCODING_OPAQUE : MMAL_ENCODING_I420;
     input->format->es->video.width = MP_ALIGN_UP(params->w, ALIGN_W);
     input->format->es->video.height = MP_ALIGN_UP(params->h, ALIGN_H);
     input->format->es->video.crop = (MMAL_RECT_T){0, 0, params->w, params->h};
-    input->format->es->video.par = (MMAL_RATIONAL_T){params->p_w, params->p_h};
-    input->format->es->video.color_space = map_csp(params->color.space);
+    input->format->es->video.par = (MMAL_RATIONAL_T){par.num, par.den};
+    input->format->es->video.color_space = map_csp(params->colorspace);
 
     if (mmal_port_format_commit(input))
         return -1;
@@ -682,8 +476,7 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
         }
     }
 
-    if (set_geometry(vo) < 0)
-        return -1;
+    resize(vo);
 
     p->renderer_enabled = true;
 
@@ -704,9 +497,6 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
 static struct mp_image *take_screenshot(struct vo *vo)
 {
     struct priv *p = vo->priv;
-
-    if (!p->display)
-        return NULL;
 
     struct mp_image *img = mp_image_alloc(IMGFMT_BGR0, p->w, p->h);
     if (!img)
@@ -740,10 +530,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
     struct priv *p = vo->priv;
 
     switch (request) {
-    case VOCTRL_FULLSCREEN:
-        if (p->renderer_enabled)
-            set_geometry(vo);
-        vo->want_redraw = true;
+    case VOCTRL_GET_PANSCAN:
         return VO_TRUE;
     case VOCTRL_SET_PANSCAN:
         if (p->renderer_enabled)
@@ -757,15 +544,14 @@ static int control(struct vo *vo, uint32_t request, void *data)
     case VOCTRL_SCREENSHOT_WIN:
         *(struct mp_image **)data = take_screenshot(vo);
         return VO_TRUE;
-    case VOCTRL_CHECK_EVENTS: {
-        pthread_mutex_lock(&p->display_mutex);
-        bool reload_required = p->reload_display;
-        p->reload_display = false;
-        pthread_mutex_unlock(&p->display_mutex);
-        if (reload_required)
-            recreate_renderer(vo);
+    case VOCTRL_CHECK_EVENTS:
+        if (atomic_load(&p->update_display)) {
+            atomic_store(&p->update_display, false);
+            update_display_size(vo);
+            if (p->renderer_enabled)
+                resize(vo);
+        }
         return VO_TRUE;
-    }
     case VOCTRL_GET_DISPLAY_FPS:
         *(double *)data = p->display_fps;
         return VO_TRUE;
@@ -779,10 +565,7 @@ static void tv_callback(void *callback_data, uint32_t reason, uint32_t param1,
 {
     struct vo *vo = callback_data;
     struct priv *p = vo->priv;
-    pthread_mutex_lock(&p->display_mutex);
-    p->reload_display = true;
-    pthread_cond_signal(&p->display_cond);
-    pthread_mutex_unlock(&p->display_mutex);
+    atomic_store(&p->update_display, true);
     vo_wakeup(vo);
 }
 
@@ -790,59 +573,10 @@ static void vsync_callback(DISPMANX_UPDATE_HANDLE_T u, void *arg)
 {
     struct vo *vo = arg;
     struct priv *p = vo->priv;
-    pthread_mutex_lock(&p->display_mutex);
+    pthread_mutex_lock(&p->vsync_mutex);
     p->vsync_counter += 1;
-    pthread_cond_signal(&p->display_cond);
-    pthread_mutex_unlock(&p->display_mutex);
-}
-
-static void destroy_dispmanx(struct vo *vo)
-{
-    struct priv *p = vo->priv;
-
-    disable_renderer(vo);
-    destroy_overlays(vo);
-
-    if (p->display) {
-        vc_dispmanx_vsync_callback(p->display, NULL, NULL);
-        vc_dispmanx_display_close(p->display);
-    }
-    p->display = 0;
-}
-
-static int recreate_dispmanx(struct vo *vo)
-{
-    struct priv *p = vo->priv;
-
-    p->display = vc_dispmanx_display_open(p->display_nr);
-    p->update = vc_dispmanx_update_start(0);
-    if (!p->display || !p->update) {
-        MP_FATAL(vo, "Could not get DISPMANX objects.\n");
-        if (p->display)
-            vc_dispmanx_display_close(p->display);
-        p->display = 0;
-        p->update = 0;
-        return -1;
-    }
-
-    update_display_size(vo);
-
-    vc_dispmanx_vsync_callback(p->display, vsync_callback, vo);
-
-    return 0;
-}
-
-static void recreate_renderer(struct vo *vo)
-{
-    MP_WARN(vo, "Recreating renderer after display change.\n");
-
-    destroy_dispmanx(vo);
-    recreate_dispmanx(vo);
-
-    if (vo->params) {
-        if (reconfig(vo, vo->params) < 0)
-            MP_FATAL(vo, "Recreation failed.\n");
-    }
+    pthread_cond_signal(&p->vsync_cond);
+    pthread_mutex_unlock(&p->vsync_mutex);
 }
 
 static void uninit(struct vo *vo)
@@ -853,18 +587,25 @@ static void uninit(struct vo *vo)
 
     talloc_free(p->next_image);
 
-    destroy_dispmanx(vo);
+    destroy_overlays(vo);
 
     if (p->update)
         vc_dispmanx_update_submit_sync(p->update);
 
-    if (p->renderer)
+    if (p->renderer) {
+        disable_renderer(vo);
         mmal_component_release(p->renderer);
+    }
+
+    if (p->display) {
+        vc_dispmanx_vsync_callback(p->display, NULL, NULL);
+        vc_dispmanx_display_close(p->display);
+    }
 
     mmal_vc_deinit();
 
-    pthread_cond_destroy(&p->display_cond);
-    pthread_mutex_destroy(&p->display_mutex);
+    pthread_cond_destroy(&p->vsync_cond);
+    pthread_mutex_destroy(&p->vsync_mutex);
 }
 
 static int preinit(struct vo *vo)
@@ -884,14 +625,12 @@ static int preinit(struct vo *vo)
         return -1;
     }
 
-    pthread_mutex_init(&p->display_mutex, NULL);
-    pthread_cond_init(&p->display_cond, NULL);
-
-    if (recreate_dispmanx(vo) < 0)
+    p->display = vc_dispmanx_display_open(p->display_nr);
+    p->update = vc_dispmanx_update_start(0);
+    if (!p->display || !p->update) {
+        MP_FATAL(vo, "Could not get DISPMANX objects.\n");
         goto fail;
-
-    if (update_display_size(vo) < 0)
-        goto fail;
+    }
 
     if (mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_RENDERER, &p->renderer))
     {
@@ -899,7 +638,15 @@ static int preinit(struct vo *vo)
         goto fail;
     }
 
+    if (update_display_size(vo) < 0)
+        goto fail;
+
     vc_tv_register_callback(tv_callback, vo);
+
+    pthread_mutex_init(&p->vsync_mutex, NULL);
+    pthread_cond_init(&p->vsync_cond, NULL);
+
+    vc_dispmanx_vsync_callback(p->display, vsync_callback, vo);
 
     return 0;
 
@@ -913,14 +660,12 @@ static const struct m_option options[] = {
     OPT_INT("display", display_nr, 0),
     OPT_INT("layer", layer, 0, OPTDEF_INT(-10)),
     OPT_FLAG("background", background, 0),
-    OPT_FLAG("osd", enable_osd, 0, OPTDEF_INT(1)),
     {0},
 };
 
 const struct vo_driver video_out_rpi = {
     .description = "Raspberry Pi (MMAL)",
     .name = "rpi",
-    .caps = VO_CAP_ROTATE90,
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,
@@ -930,5 +675,4 @@ const struct vo_driver video_out_rpi = {
     .uninit = uninit,
     .priv_size = sizeof(struct priv),
     .options = options,
-    .options_prefix = "rpi",
 };

@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <assert.h>
@@ -159,8 +159,9 @@ int mp_sws_reinit(struct mp_sws_context *ctx)
     struct mp_image_params *dst = &ctx->dst;
 
     // Neutralize unsupported or ignored parameters.
-    src->p_w = dst->p_w = 0;
-    src->p_h = dst->p_h = 0;
+    src->d_w = dst->d_w = 0;
+    src->d_h = dst->d_h = 0;
+    src->outputlevels = dst->outputlevels = MP_CSP_LEVELS_AUTO;
 
     if (cache_valid(ctx))
         return 0;
@@ -192,11 +193,11 @@ int mp_sws_reinit(struct mp_sws_context *ctx)
         return -1;
     }
 
-    int s_csp = mp_csp_to_sws_colorspace(src->color.space);
-    int s_range = src->color.levels == MP_CSP_LEVELS_PC;
+    int s_csp = mp_csp_to_sws_colorspace(src->colorspace);
+    int s_range = src->colorlevels == MP_CSP_LEVELS_PC;
 
-    int d_csp = mp_csp_to_sws_colorspace(dst->color.space);
-    int d_range = dst->color.levels == MP_CSP_LEVELS_PC;
+    int d_csp = mp_csp_to_sws_colorspace(dst->colorspace);
+    int d_range = dst->colorlevels == MP_CSP_LEVELS_PC;
 
     // Work around libswscale bug #1852 (fixed in ffmpeg commit 8edf9b1fa):
     // setting range flags for RGB gives random bogus results.
@@ -217,7 +218,7 @@ int mp_sws_reinit(struct mp_sws_context *ctx)
     av_opt_set_double(ctx->sws, "param0", ctx->params[0], 0);
     av_opt_set_double(ctx->sws, "param1", ctx->params[1], 0);
 
-#if LIBAVCODEC_VERSION_MICRO >= 100
+#if HAVE_AVCODEC_CHROMA_POS_API
     int cr_src = mp_chroma_location_to_av(src->chroma_location);
     int cr_dst = mp_chroma_location_to_av(dst->chroma_location);
     int cr_xpos, cr_ypos;

@@ -30,26 +30,21 @@
 #include "common/common.h"
 #include "options/options.h"
 
-enum {
-    // VO needs to redraw
-    VO_EVENT_EXPOSE                     = 1 << 0,
-    // VO needs to update state to a new window size
-    VO_EVENT_RESIZE                     = 1 << 1,
-    // The ICC profile needs to be reloaded
-    VO_EVENT_ICC_PROFILE_CHANGED        = 1 << 2,
-    // Some other window state changed (position, window state, fps)
-    VO_EVENT_WIN_STATE                  = 1 << 3,
-    // The ambient light conditions changed and need to be reloaded
-    VO_EVENT_AMBIENT_LIGHTING_CHANGED   = 1 << 4,
-    // Special mechanism for making resizing with Cocoa react faster
-    VO_EVENT_LIVE_RESIZING              = 1 << 5,
-    // Window fullscreen state changed via external influence.
-    VO_EVENT_FULLSCREEN_STATE           = 1 << 6,
+// VO needs to redraw
+#define VO_EVENT_EXPOSE 1
+// VO needs to update state to a new window size
+#define VO_EVENT_RESIZE 2
+// The ICC profile needs to be reloaded
+#define VO_EVENT_ICC_PROFILE_CHANGED 4
+// Some other window state changed (position, window state, fps)
+#define VO_EVENT_WIN_STATE 8
+// The ambient light conditions changed and need to be reloaded
+#define VO_EVENT_AMBIENT_LIGHTING_CHANGED 16
+// Special mechanism for making resizing with Cocoa react faster
+#define VO_EVENT_LIVE_RESIZING 32
 
-    // Set of events the player core may be interested in.
-    VO_EVENTS_USER = VO_EVENT_RESIZE | VO_EVENT_WIN_STATE |
-                     VO_EVENT_FULLSCREEN_STATE,
-};
+// Set of events the player core may be interested in.
+#define VO_EVENTS_USER (VO_EVENT_RESIZE | VO_EVENT_WIN_STATE)
 
 enum mp_voctrl {
     /* signal a device reset seek */
@@ -61,12 +56,14 @@ enum mp_voctrl {
     /* start/resume playback */
     VOCTRL_RESUME,
 
+    VOCTRL_GET_PANSCAN,
     VOCTRL_SET_PANSCAN,
     VOCTRL_SET_EQUALIZER,               // struct voctrl_set_equalizer_args*
     VOCTRL_GET_EQUALIZER,               // struct voctrl_get_equalizer_args*
 
-    /* private to vo_opengl */
-    VOCTRL_LOAD_HWDEC_API,
+    /* for hardware decoding */
+    VOCTRL_GET_HWDEC_INFO,              // struct mp_hwdec_info**
+    VOCTRL_LOAD_HWDEC_API,              // private to vo_opengl
 
     // Redraw the image previously passed to draw_image() (basically, repeat
     // the previous draw_image call). If this is handled, the OSD should also
@@ -78,12 +75,7 @@ enum mp_voctrl {
     VOCTRL_BORDER,
     VOCTRL_ALL_WORKSPACES,
 
-    VOCTRL_GET_FULLSCREEN,
-
     VOCTRL_UPDATE_WINDOW_TITLE,         // char*
-    VOCTRL_UPDATE_PLAYBACK_STATE,       // struct voctrl_playback_state*
-
-    VOCTRL_PERFORMANCE_DATA,            // struct voctrl_performance_data*
 
     VOCTRL_SET_CURSOR_VISIBILITY,       // bool*
 
@@ -107,11 +99,12 @@ enum mp_voctrl {
     // Retrieve window contents. (Normal screenshots use vo_get_current_frame().)
     VOCTRL_SCREENSHOT_WIN,              // struct mp_image**
 
-    VOCTRL_UPDATE_RENDER_OPTS,
+    VOCTRL_SET_COMMAND_LINE,            // char**
 
     VOCTRL_GET_ICC_PROFILE,             // bstr*
     VOCTRL_GET_AMBIENT_LUX,             // int*
     VOCTRL_GET_DISPLAY_FPS,             // double*
+    VOCTRL_GET_RECENT_FLIP_TIME,        // int64_t* (using mp_time_us())
 
     VOCTRL_GET_PREF_DEINT,              // int*
 };
@@ -137,30 +130,15 @@ struct voctrl_get_equalizer_args {
 #define VO_NOTAVAIL     -2
 #define VO_NOTIMPL      -3
 
-// VOCTRL_UPDATE_PLAYBACK_STATE
-struct voctrl_playback_state {
-    bool taskbar_progress;
-    bool playing;
-    bool paused;
-    int percent_pos;
-};
+#define VOFLAG_HIDDEN           0x10  //< Use to create a hidden window
+#define VOFLAG_GLES             0x20  // Hint to prefer GLES2 if possible
+#define VOFLAG_GL_DEBUG         0x40  // Hint to request debug OpenGL context
+#define VOFLAG_ALPHA            0x80  // Hint to request alpha framebuffer
 
-// VOCTRL_PERFORMANCE_DATA
-struct voctrl_performance_entry {
-    // Times are in microseconds
-    uint64_t last, avg, peak;
-};
-
-struct voctrl_performance_data {
-    struct voctrl_performance_entry upload, render, present;
-};
-
-enum {
-    // VO does handle mp_image_params.rotate in 90 degree steps
-    VO_CAP_ROTATE90     = 1 << 0,
-    // VO does framedrop itself (vo_vdpau). Untimed/encoding VOs never drop.
-    VO_CAP_FRAMEDROP    = 1 << 1,
-};
+// VO does handle mp_image_params.rotate in 90 degree steps
+#define VO_CAP_ROTATE90 1
+// VO does framedrop itself (vo_vdpau). Untimed/encoding VOs never drop.
+#define VO_CAP_FRAMEDROP 2
 
 #define VO_MAX_REQ_FRAMES 10
 
@@ -174,8 +152,6 @@ struct vo_extra {
     struct osd_state *osd;
     struct encode_lavc_context *encode_lavc_ctx;
     struct mpv_opengl_cb_context *opengl_cb_context;
-    void (*wakeup_cb)(void *ctx);
-    void *wakeup_ctx;
 };
 
 struct vo_frame {
@@ -184,22 +160,18 @@ struct vo_frame {
     int64_t pts;
     // Approximate frame duration, in us.
     int duration;
-    // Realtime of estimated distance between 2 vsync events.
-    double vsync_interval;
+    // Realtime of estimated previous and next vsync events.
+    int64_t next_vsync;
+    int64_t prev_vsync;
     // "ideal" display time within the vsync
-    double vsync_offset;
-    // "ideal" frame duration (can be different from num_vsyncs*vsync_interval
-    // up to a vsync) - valid for the entire frame, i.e. not changed for repeats
-    double ideal_frame_duration;
+    int64_t vsync_offset;
     // how often the frame will be repeated (does not include OSD redraws)
     int num_vsyncs;
     // Set if the current frame is repeated from the previous. It's guaranteed
     // that the current is the same as the previous one, even if the image
     // pointer is different.
-    // The repeat flag is set if exactly the same frame should be rendered
-    // again (and the OSD does not need to be redrawn).
-    // A repeat frame can be redrawn, in which case repeat==redraw==true, and
-    // OSD should be updated.
+    // The repeat flag is additionally set if the OSD does not need to be
+    // redrawn.
     bool redraw, repeat;
     // The frame is not in movement - e.g. redrawing while paused.
     bool still;
@@ -218,13 +190,6 @@ struct vo_frame {
     // VO if frames are dropped.
     int num_frames;
     struct mp_image *frames[VO_MAX_REQ_FRAMES];
-    // ID for frames[0] (== current). If current==NULL, the number is
-    // meaningless. Otherwise, it's an unique ID for the frame. The ID for
-    // a frame is guaranteed not to change (instant redraws will use the same
-    // ID). frames[n] has the ID frame_id+n, with the guarantee that frame
-    // drops or reconfigs will keep the guarantee.
-    // The ID is never 0 (unless num_frames==0). IDs are strictly monotonous.
-    uint64_t frame_id;
 };
 
 struct vo_driver {
@@ -255,9 +220,10 @@ struct vo_driver {
     /*
      * Initialize or reconfigure the display driver.
      *   params: video parameters, like pixel format and frame size
+     *   flags: combination of VOFLAG_ values
      * returns: < 0 on error, >= 0 on success
      */
-    int (*reconfig)(struct vo *vo, struct mp_image_params *params);
+    int (*reconfig)(struct vo *vo, struct mp_image_params *params, int flags);
 
     /*
      * Control interface
@@ -286,8 +252,9 @@ struct vo_driver {
     void (*flip_page)(struct vo *vo);
 
     /* These optional callbacks can be provided if the GUI framework used by
-     * the VO requires entering a message loop for receiving events and does
-     * not call vo_wakeup() from a separate thread when there are new events.
+     * the VO requires entering a message loop for receiving events, does not
+     * provide event_fd, and does not call vo_wakeup() from a separate thread
+     * when there are new events.
      *
      * wait_events() will wait for new events, until the timeout expires, or the
      * function is interrupted. wakeup() is used to possibly interrupt the
@@ -298,7 +265,7 @@ struct vo_driver {
      * immediately.
      */
     void (*wakeup)(struct vo *vo);
-    void (*wait_events)(struct vo *vo, int64_t until_time_us);
+    int (*wait_events)(struct vo *vo, int64_t until_time_us);
 
     /*
      * Closes driver. Should restore the original state of the system.
@@ -312,16 +279,7 @@ struct vo_driver {
     const void *priv_defaults;
 
     // List of options to parse into priv struct (requires priv_size to be set)
-    // This will register them as global options (with options_prefix), and
-    // copy the current value at VO creation time to the priv struct.
     const struct m_option *options;
-
-    // All options in the above array are prefixed with this string. (It's just
-    // for convenience and makes no difference in semantics.)
-    const char *options_prefix;
-
-    // Registers global options that go to a separate options struct.
-    const struct m_sub_options *global_opts;
 };
 
 struct vo {
@@ -333,15 +291,16 @@ struct vo {
     struct vo_w32_state *w32;
     struct vo_cocoa_state *cocoa;
     struct vo_wayland_state *wayland;
-    struct mp_hwdec_devices *hwdec_devs;
     struct input_ctx *input_ctx;
     struct osd_state *osd;
     struct encode_lavc_context *encode_lavc_ctx;
     struct vo_internal *in;
+    struct mp_vo_opts *opts;
     struct vo_extra extra;
 
     // --- The following fields are generally only changed during initialization.
 
+    int event_fd;  // check_events() should be called when this has input
     bool probing;
 
     // --- The following fields are only changed with vo_reconfig(), and can
@@ -353,9 +312,6 @@ struct vo {
     // --- The following fields can be accessed only by the VO thread, or from
     //     anywhere _if_ the VO thread is suspended (use vo->dispatch).
 
-    struct m_config_cache *opts_cache; // cache for ->opts
-    struct mp_vo_opts *opts;
-
     bool want_redraw;   // redraw as soon as possible
 
     // current window state
@@ -366,10 +322,9 @@ struct vo {
 
 struct mpv_global;
 struct vo *init_best_video_out(struct mpv_global *global, struct vo_extra *ex);
-int vo_reconfig(struct vo *vo, struct mp_image_params *p);
+int vo_reconfig(struct vo *vo, struct mp_image_params *p, int flags);
 
-int vo_control(struct vo *vo, int request, void *data);
-void vo_control_async(struct vo *vo, int request, void *data);
+int vo_control(struct vo *vo, uint32_t request, void *data);
 bool vo_is_ready_for_frame(struct vo *vo, int64_t next_pts);
 void vo_queue_frame(struct vo *vo, struct vo_frame *frame);
 void vo_wait_frame(struct vo *vo);
@@ -382,22 +337,21 @@ void vo_destroy(struct vo *vo);
 void vo_set_paused(struct vo *vo, bool paused);
 int64_t vo_get_drop_count(struct vo *vo);
 void vo_increment_drop_count(struct vo *vo, int64_t n);
-int64_t vo_get_delayed_count(struct vo *vo);
+int64_t vo_get_missed_count(struct vo *vo);
 void vo_query_formats(struct vo *vo, uint8_t *list);
 void vo_event(struct vo *vo, int event);
 int vo_query_and_reset_events(struct vo *vo, int events);
 struct mp_image *vo_get_current_frame(struct vo *vo);
-void vo_set_queue_params(struct vo *vo, int64_t offset_us, int num_req_frames);
+void vo_set_queue_params(struct vo *vo, int64_t offset_us, bool vsync_timed,
+                         int num_req_frames);
 int vo_get_num_req_frames(struct vo *vo);
 int64_t vo_get_vsync_interval(struct vo *vo);
-double vo_get_estimated_vsync_interval(struct vo *vo);
-double vo_get_estimated_vsync_jitter(struct vo *vo);
 double vo_get_display_fps(struct vo *vo);
-double vo_get_delay(struct vo *vo);
-void vo_discard_timing_info(struct vo *vo);
+int64_t vo_get_next_frame_start_time(struct vo *vo);
 
 void vo_wakeup(struct vo *vo);
-void vo_wait_default(struct vo *vo, int64_t until_time);
+
+const char *vo_get_window_title(struct vo *vo);
 
 struct mp_keymap {
   int from;

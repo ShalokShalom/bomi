@@ -20,8 +20,6 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include <libavutil/rational.h>
-
 #include "common/msg.h"
 #include "common/common.h"
 
@@ -36,9 +34,9 @@ struct vf_priv_s {
     int outfmt;
     int colormatrix;
     int colorlevels;
+    int outputlevels;
     int primaries;
     int gamma;
-    float peak;
     int chroma_location;
     int stereo_in;
     int stereo_out;
@@ -88,15 +86,15 @@ static int reconfig(struct vf_instance *vf, struct mp_image_params *in,
     if (p->outfmt)
         out->imgfmt = p->outfmt;
     if (p->colormatrix)
-        out->color.space = p->colormatrix;
+        out->colorspace = p->colormatrix;
     if (p->colorlevels)
-        out->color.levels = p->colorlevels;
+        out->colorlevels = p->colorlevels;
+    if (p->outputlevels)
+        out->outputlevels = p->outputlevels;
     if (p->primaries)
-        out->color.primaries = p->primaries;
+        out->primaries = p->primaries;
     if (p->gamma)
-        out->color.gamma = p->gamma;
-    if (p->peak)
-        out->color.sig_peak = p->peak;
+        out->gamma = p->gamma;
     if (p->chroma_location)
         out->chroma_location = p->chroma_location;
     if (p->stereo_in)
@@ -105,16 +103,12 @@ static int reconfig(struct vf_instance *vf, struct mp_image_params *in,
         out->stereo_out = p->stereo_out;
     if (p->rotate >= 0)
         out->rotate = p->rotate;
-
-    AVRational dsize;
-    mp_image_params_get_dsize(out, &dsize.num, &dsize.den);
     if (p->dw > 0)
-        dsize.num = p->dw;
+        out->d_w = p->dw;
     if (p->dh > 0)
-        dsize.den = p->dh;
+        out->d_h = p->dh;
     if (p->dar > 0)
-        dsize = av_d2q(p->dar, INT_MAX);
-    mp_image_params_set_dsize(out, dsize.num, dsize.den);
+        vf_set_dar(&out->d_w, &out->d_h, out->w, out->h, p->dar);
 
     // Make sure the user-overrides are consistent (no RGB csp for YUV, etc.).
     mp_image_params_guess_csp(out);
@@ -143,9 +137,9 @@ static const m_option_t vf_opts_fields[] = {
     OPT_IMAGEFORMAT("outfmt", outfmt, 0),
     OPT_CHOICE_C("colormatrix", colormatrix, 0, mp_csp_names),
     OPT_CHOICE_C("colorlevels", colorlevels, 0, mp_csp_levels_names),
+    OPT_CHOICE_C("outputlevels", outputlevels, 0, mp_csp_levels_names),
     OPT_CHOICE_C("primaries", primaries, 0, mp_csp_prim_names),
     OPT_CHOICE_C("gamma", gamma, 0, mp_csp_trc_names),
-    OPT_FLOAT("peak", peak, 0),
     OPT_CHOICE_C("chroma-location", chroma_location, 0, mp_chroma_names),
     OPT_CHOICE_C("stereo-in", stereo_in, 0, mp_stereo3d_names),
     OPT_CHOICE_C("stereo-out", stereo_out, 0, mp_stereo3d_names),
@@ -153,7 +147,6 @@ static const m_option_t vf_opts_fields[] = {
     OPT_INT("dw", dw, 0),
     OPT_INT("dh", dh, 0),
     OPT_DOUBLE("dar", dar, 0),
-    OPT_REMOVED("outputlevels", "use the --video-output-levels global option"),
     {0}
 };
 

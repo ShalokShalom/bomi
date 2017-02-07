@@ -73,8 +73,6 @@ char *ta_talloc_asprintf_append_buffer(char *s, const char *fmt, ...) TA_PRF(2, 
 
 // mpv specific stuff - should be made part of proper TA API
 
-#define TA_FREEP(pctx) do {talloc_free(*(pctx)); *(pctx) = NULL;} while(0)
-
 #define TA_EXPAND_ARGS(...) __VA_ARGS__
 
 #define MP_TALLOC_AVAIL(p) (talloc_get_size(p) / sizeof((p)[0]))
@@ -91,6 +89,8 @@ char *ta_talloc_asprintf_append_buffer(char *s, const char *fmt, ...) TA_PRF(2, 
         if (nextidx_ >= MP_TALLOC_AVAIL(p))         \
             MP_RESIZE_ARRAY(ctx, p, ta_calc_prealloc_elems(nextidx_)); \
     } while (0)
+
+#define MP_GROW_ARRAY(p, nextidx) MP_TARRAY_GROW(NULL, p, nextidx)
 
 #define MP_TARRAY_APPEND(ctx, p, idxvar, ...)       \
     do {                                            \

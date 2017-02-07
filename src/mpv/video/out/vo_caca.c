@@ -96,7 +96,7 @@ static int resize(struct vo *vo)
     return 0;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params)
+static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
 {
     struct priv *priv = vo->priv;
     priv->image_height = params->h;

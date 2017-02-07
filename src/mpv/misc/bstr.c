@@ -1,18 +1,18 @@
 /*
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <string.h>
@@ -24,7 +24,7 @@
 
 #include <libavutil/common.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "common/common.h"
 #include "misc/ctype.h"
@@ -215,9 +215,9 @@ struct bstr *bstr_splitlines(void *talloc_ctx, struct bstr str)
     return r;
 }
 
-struct bstr bstr_splitchar(struct bstr str, struct bstr *rest, const char c)
+struct bstr bstr_getline(struct bstr str, struct bstr *rest)
 {
-    int pos = bstrchr(str, c);
+    int pos = bstrchr(str, '\n');
     if (pos < 0)
         pos = str.len;
     if (rest)
@@ -240,14 +240,6 @@ bool bstr_eatstart(struct bstr *s, struct bstr prefix)
     if (!bstr_startswith(*s, prefix))
         return false;
     *s = bstr_cut(*s, prefix.len);
-    return true;
-}
-
-bool bstr_eatend(struct bstr *s, struct bstr prefix)
-{
-    if (!bstr_endswith(*s, prefix))
-        return false;
-    s->len -= prefix.len;
     return true;
 }
 
@@ -409,21 +401,15 @@ void bstr_xappend_vasprintf(void *talloc_ctx, bstr *s, const char *fmt,
     int size;
     va_list copy;
     va_copy(copy, ap);
-    size_t avail = talloc_get_size(s->start) - s->len;
-    char *dest = s->start ? s->start + s->len : NULL;
     char c;
-    if (avail < 1)
-        dest = &c;
-    size = vsnprintf(dest, MPMAX(avail, 1), fmt, copy);
+    size = vsnprintf(&c, 1, fmt, copy);
     va_end(copy);
 
     if (size < 0)
         abort();
 
-    if (avail < 1 || size + 1 > avail) {
-        resize_append(talloc_ctx, s, size + 1);
-        vsnprintf(s->start + s->len, size + 1, fmt, ap);
-    }
+    resize_append(talloc_ctx, s, size + 1);
+    vsnprintf(s->start + s->len, size + 1, fmt, ap);
     s->len += size;
 }
 

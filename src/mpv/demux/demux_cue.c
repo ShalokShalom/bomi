@@ -3,18 +3,18 @@
  *
  * This file is part of mpv.
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -23,7 +23,7 @@
 #include <dirent.h>
 #include <inttypes.h>
 
-#include "mpv_talloc.h"
+#include "talloc.h"
 
 #include "misc/bstr.h"
 #include "common/msg.h"
@@ -38,7 +38,7 @@
 #define PROBE_SIZE 512
 
 struct priv {
-    struct cue_file *f;
+    bstr data;
 };
 
 static void add_source(struct timeline *tl, struct demuxer *d)
@@ -150,18 +150,15 @@ static void build_timeline(struct timeline *tl)
 
     add_source(tl, tl->demuxer);
 
-    struct cue_track *tracks = NULL;
-    size_t track_count = 0;
-
-    for (size_t n = 0; n < p->f->num_tracks; n++) {
-        struct cue_track *track = &p->f->tracks[n];
-        if (track->filename) {
-            MP_TARRAY_APPEND(ctx, tracks, track_count, *track);
-        } else {
-            MP_WARN(tl->demuxer, "No file specified for track entry %zd. "
-                    "It will be removed\n", n + 1);
-        }
+    struct cue_file *f = mp_parse_cue(p->data);
+    if (!f) {
+        MP_ERR(tl, "CUE: error parsing input file!\n");
+        goto out;
     }
+    talloc_steal(ctx, f);
+
+    struct cue_track *tracks = f->tracks;
+    size_t track_count = f->num_tracks;
 
     if (track_count == 0) {
         MP_ERR(tl, "CUE: no tracks found!\n");
@@ -227,8 +224,10 @@ static void build_timeline(struct timeline *tl)
         };
         chapters[i] = (struct demux_chapter) {
             .pts = timeline[i].start,
-            .metadata = mp_tags_dup(tl, tracks[i].tags),
+            .metadata = talloc_zero(tl, struct mp_tags),
         };
+        // might want to include other metadata here
+        mp_tags_set_str(chapters[i].metadata, "title", tracks[i].title);
         starttime += duration;
     }
 
@@ -253,9 +252,6 @@ out:
 
 static int try_open_file(struct demuxer *demuxer, enum demux_check check)
 {
-    if (!demuxer->access_references)
-        return -1;
-
     struct stream *s = demuxer->stream;
     if (check >= DEMUX_CHECK_UNSAFE) {
         bstr d = stream_peek(s, PROBE_SIZE);
@@ -265,18 +261,9 @@ static int try_open_file(struct demuxer *demuxer, enum demux_check check)
     struct priv *p = talloc_zero(demuxer, struct priv);
     demuxer->priv = p;
     demuxer->fully_read = true;
-
-    bstr data = stream_read_complete(s, p, 1000000);
-    if (data.start == NULL)
+    p->data = stream_read_complete(s, demuxer, 1000000);
+    if (p->data.start == NULL)
         return -1;
-    p->f = mp_parse_cue(data);
-    talloc_steal(p, p->f);
-    if (!p->f) {
-        MP_ERR(demuxer, "error parsing input file!\n");
-        return -1;
-    }
-
-    mp_tags_merge(demuxer->metadata, p->f->tags);
     return 0;
 }
 

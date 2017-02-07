@@ -2,18 +2,18 @@
  * This file is part of mpv video player.
  * Copyright © 2013 Alexander Preisinger <alexander.preisinger@gmail.com>
  *
- * mpv is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -47,8 +47,28 @@ static const struct wl_buffer_listener buffer_listener;
 static const format_t format_table[] = {
     {WL_SHM_FORMAT_ARGB8888, IMGFMT_BGRA}, // 8b 8g 8r 8a
     {WL_SHM_FORMAT_XRGB8888, IMGFMT_BGR0},
+    {WL_SHM_FORMAT_RGB332,   IMGFMT_RGB8}, // 3b 3g 2r
+    {WL_SHM_FORMAT_BGR233,   IMGFMT_BGR8}, // 3r 3g 3b,
 #if BYTE_ORDER == LITTLE_ENDIAN
+    {WL_SHM_FORMAT_XRGB4444, IMGFMT_RGB444}, // 4b 4g 4r 4a
+    {WL_SHM_FORMAT_XBGR4444, IMGFMT_BGR444}, // 4r 4g 4b 4a
+    {WL_SHM_FORMAT_ARGB4444, IMGFMT_RGB444},
+    {WL_SHM_FORMAT_ABGR4444, IMGFMT_BGR444},
+    {WL_SHM_FORMAT_XRGB1555, IMGFMT_RGB555}, // 5b 5g 5r 1a
+    {WL_SHM_FORMAT_XBGR1555, IMGFMT_BGR555}, // 5r 5g 5b 1a
+    {WL_SHM_FORMAT_ARGB1555, IMGFMT_RGB555},
+    {WL_SHM_FORMAT_ABGR1555, IMGFMT_BGR555},
     {WL_SHM_FORMAT_RGB565,   IMGFMT_RGB565}, // 5b 6g 5r
+    {WL_SHM_FORMAT_BGR565,   IMGFMT_BGR565}, // 5r 6g 5b
+#else
+    {WL_SHM_FORMAT_RGBX4444, IMGFMT_BGR444}, // 4a 4b 4g 4r
+    {WL_SHM_FORMAT_BGRX4444, IMGFMT_RGB444}, // 4a 4r 4g 4b
+    {WL_SHM_FORMAT_RGBA4444, IMGFMT_BGR444},
+    {WL_SHM_FORMAT_BGRA4444, IMGFMT_RGB444},
+    {WL_SHM_FORMAT_RGBX5551, IMGFMT_BGR555}, // 1a 5g 5b 5r
+    {WL_SHM_FORMAT_BGRX5551, IMGFMT_RGB555}, // 1a 5r 5g 5b
+    {WL_SHM_FORMAT_RGBA5551, IMGFMT_BGR555},
+    {WL_SHM_FORMAT_BGRA5551, IMGFMT_RGB555},
 #endif
     {WL_SHM_FORMAT_RGB888,   IMGFMT_BGR24}, // 8b 8g 8r
     {WL_SHM_FORMAT_BGR888,   IMGFMT_RGB24}, // 8r 8g 8b
@@ -111,6 +131,8 @@ struct priv {
     shm_buffer_t *osd_buffers[MAX_OSD_PARTS];
     // this id tells us if the subtitle part has changed or not
     int change_id[MAX_OSD_PARTS];
+
+    int64_t recent_flip_time; // last frame event
 
     // options
     int enable_alpha;
@@ -249,15 +271,10 @@ static bool resize(struct priv *p)
     if (!p->video_bufpool.back_buffer || SHM_BUFFER_IS_BUSY(p->video_bufpool.back_buffer))
         return false; // skip resizing if we can't guarantee pixel perfectness!
 
-    int32_t scale = 1;
     int32_t x = wl->window.sh_x;
     int32_t y = wl->window.sh_y;
-
-    if (wl->display.current_output)
-        scale = wl->display.current_output->scale;
-
-    wl->vo->dwidth = scale*wl->window.sh_width;
-    wl->vo->dheight = scale*wl->window.sh_height;
+    wl->vo->dwidth = wl->window.sh_width;
+    wl->vo->dheight = wl->window.sh_height;
 
     vo_get_src_dst_rects(p->vo, &p->src, &p->dst, &p->osd);
     p->src_w = p->src.x1 - p->src.x0;
@@ -278,15 +295,14 @@ static bool resize(struct priv *p)
     if (y != 0)
         y = wl->window.height - p->dst_h;
 
-    wl_surface_set_buffer_scale(wl->window.video_surface, scale);
     mp_sws_set_from_cmdline(p->sws, p->vo->opts->sws_opts);
     p->sws->src = p->in_format;
     p->sws->dst = (struct mp_image_params) {
         .imgfmt = p->video_format->mp_format,
         .w = p->dst_w,
         .h = p->dst_h,
-        .p_w = 1,
-        .p_h = 1,
+        .d_w = p->dst_w,
+        .d_h = p->dst_h,
     };
 
     mp_image_params_guess_csp(&p->sws->dst);
@@ -307,13 +323,14 @@ static bool resize(struct priv *p)
     if (!p->enable_alpha) {
         struct wl_region *opaque =
             wl_compositor_create_region(wl->display.compositor);
-        wl_region_add(opaque, 0, 0, p->dst_w/scale, p->dst_h/scale);
+        wl_region_add(opaque, 0, 0, p->dst_w, p->dst_h);
         wl_surface_set_opaque_region(wl->window.video_surface, opaque);
         wl_region_destroy(opaque);
     }
 
     p->x = x;
     p->y = y;
+    p->wl->window.events = 0;
     p->vo->want_redraw = true;
     return true;
 }
@@ -372,7 +389,8 @@ static void draw_image(struct vo *vo, mp_image_t *mpi)
         p->original_image = mpi;
     }
 
-    vo_wayland_wait_events(vo, 0);
+    if (!vo_wayland_wait_frame(vo))
+        MP_DBG(p->wl, "discarding frame callback\n");
 
     shm_buffer_t *buf = buffer_pool_get_back(&p->video_bufpool);
 
@@ -468,11 +486,7 @@ static const bool osd_formats[SUBBITMAP_COUNT] = {
 
 static void draw_osd(struct vo *vo)
 {
-    int32_t scale = 1;
     struct priv *p = vo->priv;
-
-    if (p->wl && p->wl->display.current_output)
-        scale = p->wl->display.current_output->scale;
 
     // detach all buffers and attach all needed buffers in osd_draw
     // only the most recent attach & commit is applied once the parent surface
@@ -480,7 +494,6 @@ static void draw_osd(struct vo *vo)
     for (int i = 0; i < MAX_OSD_PARTS; ++i) {
         struct wl_surface *s = p->osd_surfaces[i];
         wl_surface_attach(s, NULL, 0, 0);
-        wl_surface_set_buffer_scale(s, scale);
         wl_surface_damage(s, 0, 0, p->dst_w, p->dst_h);
         wl_surface_commit(s);
     }
@@ -500,6 +513,7 @@ static void redraw(void *data, uint32_t time)
 
     p->x = 0;
     p->y = 0;
+    p->recent_flip_time = mp_time_us();
 }
 
 static void flip_page(struct vo *vo)
@@ -511,7 +525,8 @@ static void flip_page(struct vo *vo)
     if (!p->wl->frame.callback)
         vo_wayland_request_frame(vo, p, redraw);
 
-    vo_wayland_wait_events(vo, 0);
+    if (!vo_wayland_wait_frame(vo))
+        MP_DBG(p->wl, "discarding frame callback\n");
 }
 
 static int query_format(struct vo *vo, int format)
@@ -529,7 +544,7 @@ static int query_format(struct vo *vo, int format)
     return 0;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *fmt)
+static int reconfig(struct vo *vo, struct mp_image_params *fmt, int flags)
 {
     struct priv *p = vo->priv;
     mp_image_unrefp(&p->original_image);
@@ -571,7 +586,7 @@ static int reconfig(struct vo *vo, struct mp_image_params *fmt)
     buffer_pool_reinit(p, &p->video_bufpool, 2, p->width, p->height,
                        *p->video_format, p->wl->display.shm);
 
-    vo_wayland_config(vo);
+    vo_wayland_config(vo, flags);
 
     resize(p);
 
@@ -639,12 +654,20 @@ static int control(struct vo *vo, uint32_t request, void *data)
 {
     struct priv *p = vo->priv;
     switch (request) {
-    case VOCTRL_SET_PANSCAN: {
+    case VOCTRL_GET_PANSCAN:
+        return VO_TRUE;
+    case VOCTRL_SET_PANSCAN:
+    {
         resize(p);
         return VO_TRUE;
     }
     case VOCTRL_REDRAW_FRAME:
         return redraw_frame(p);
+    case VOCTRL_GET_RECENT_FLIP_TIME:
+    {
+        *(int64_t*) data = p->recent_flip_time;
+        return VO_TRUE;
+    }
     }
     int events = 0;
     int r = vo_wayland_control(vo, &events, request, data);
@@ -669,14 +692,11 @@ const struct vo_driver video_out_wayland = {
     .control = control,
     .draw_image = draw_image,
     .flip_page = flip_page,
-    .wakeup = vo_wayland_wakeup,
-    .wait_events = vo_wayland_wait_events,
     .uninit = uninit,
     .options = (const struct m_option[]) {
         OPT_FLAG("alpha", enable_alpha, 0),
         OPT_FLAG("rgb565", use_rgb565, 0),
         {0}
     },
-    .options_prefix = "vo-wayland",
 };
 

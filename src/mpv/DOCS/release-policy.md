@@ -25,8 +25,7 @@ Release procedure
 
 - Create and/or update the `VERSION` file.
 
-- Update `DOCS/client-api-changes.rst` and `DOCS/interface-changes.rst`
-  (in particular, update the last version numbers if necessary)
+- Update `DOCS/client-api-changes.rst` (on major releases).
 
 - Create tag v0.X.Y.
 
