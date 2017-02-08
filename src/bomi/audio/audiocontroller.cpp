@@ -381,7 +381,6 @@ af_info create_info() {
     static af_info info = {
         "bomi audio controller",
         "dummy",
-        AF_FLAGS_NOT_REENTRANT,
         AudioController::open,
         sizeof(bomi_af_priv),
         nullptr,

@@ -29,11 +29,12 @@ if [ "$kern" = "Darwin" ]; then
 elif [ "$kern" = "Linux" ]; then
     os="linux"
     mpv_args="$mpv_args --enable-alsa --enable-oss-audio"
+    mpv_args="$mpv_args --enable-gl-x11 --enable-x11 "
     njobs=$(nproc)
     echo "configure for Linux..."
 elif [[ "$kern" = MINGW* ]]; then
     os="win"
-    mpv_args="$mpv_args --enable-dsound --enable-wasapi --enable-dxva2-hwaccel"
+    mpv_args="$mpv_args --enable-gl-win32 --enable-dsound --enable-wasapi --enable-dxva2-hwaccel"
     njobs=$(nproc)
     mkspec=win32-g++
 	if [[ "$kern" = MINGW64* ]]; then
@@ -451,13 +452,14 @@ if has_arg "developer"; then
     transdir=$(pwd)/src/bomi/translations
 fi
 
-check_pkg_or_exit "ffmpeg >= 2.4" "libavformat >= 56.01.0" "libavutil >= 54.02.0" "libavcodec >= 56.1.0" "libswscale >= 2.1.3" "libswresample" "libavfilter"
+check_pkg_or_exit ffmpeg "libavformat >= 56.01.0" "libavutil >= 54.02.0" "libavcodec >= 56.1.0" "libswscale >= 2.1.3" "libswresample" "libavfilter"
 check_pkg_or_exit "libass >= 0.12.1"
 check_pkg_or_exit "dvdread"
 check_pkg_or_exit "dvdnav"
 check_pkg_or_exit "libbluray"
 #check_pkg_or_exit "icu-uc"
 check_pkg_or_exit "chardet"
+check_pkg_or_exit "uchardet"
 if [ $os = "linux" ]; then
     check_pkg_or_exit glib "glib-2.0" "gobject-2.0"
     check_pkg_or_exit xcb "xcb" "xcb-icccm" "xcb-screensaver" "xcb-randr" "xcb-xtest" "x11"
@@ -477,7 +479,7 @@ check_feature_one() {
     local var=$(get_feature_name)
     local pkg=$(get_option_field $f_pkg)
     local value=$(eval echo \$$var)
-    if [ -z $var ]; then continue; fi
+    if [ -z $var ]; then return; fi
     if [ $value = enable ]; then
         check_pkg_or_exit "$pkg"
     elif [ $value = autodetect ]; then

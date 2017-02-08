@@ -1,0 +1,4 @@
+[submodule "mpv"]
+	path = src/mpv
+	url = https://github.com/d-s-x/mpv
+	branch = bomi
